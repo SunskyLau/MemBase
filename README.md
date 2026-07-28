@@ -128,6 +128,7 @@ The `🔍` marker means the memory layer can emit smartcomment execution graphs 
 - [LongMemEval](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned)
 - [LoCoMo](https://github.com/snap-research/locomo/tree/main/data)
 - [RealMem](https://github.com/AvatarMemory/RealMemBench/tree/main/dataset)
+- [MobileMem](https://huggingface.co/datasets/zjunlp/MobileMem)
 
 ---
 
