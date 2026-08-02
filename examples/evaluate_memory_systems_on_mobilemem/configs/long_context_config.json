@@ -1,0 +1,6 @@
+{
+    "user_id": "guest",
+    "context_window": 200000,
+    "llm_model": "gpt-4.1-mini",
+    "save_dir": "examples/evaluate_memory_systems_on_mobilemem/outputs/long_context"
+}

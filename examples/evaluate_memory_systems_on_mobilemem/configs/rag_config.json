@@ -1,0 +1,13 @@
+{
+    "user_id": "guest",
+    "max_tokens": 1200,
+    "deferred": true,
+    "llm_model": "gpt-4.1-mini",
+    "retriever_name_or_path": "openai:Qwen3-Embedding-4B",
+    "retriever_dim": 2560,
+    "embedding_kwargs": {
+        "api_key": "EMPTY",
+        "base_url": "http://localhost:8008/v1"
+    },
+    "save_dir": "examples/evaluate_memory_systems_on_mobilemem/outputs/rag"
+}
