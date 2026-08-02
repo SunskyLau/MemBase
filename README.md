@@ -141,6 +141,7 @@ See the [`examples/`](examples/) directory for step-by-step tutorials:
 | [Evaluate A-MEM on LongMemEval](examples/evaluate_amem_on_longmemeval/) | Run the full three-stage evaluation pipeline (construction, retrieval, QA) using A-MEM on LongMemEval |
 | [Evaluate Mem0 on LoCoMo](examples/evaluate_mem0_on_locomo/) | Evaluate Mem0 (with Kuzu graph store) on LoCoMo, with a custom question-answering prompt and adversarial question filtering |
 | [Evaluate MemOS on LoCoMo](examples/evaluate_memos_on_locomo/) | Evaluate MemOS with vLLM-served embedding on LoCoMo, with adversarial question filtering |
+| [Evaluate Memory Systems on MobileMem](examples/evaluate_memory_systems_on_mobilemem/) | Evaluate eight memory systems on MobileMem with the unified three-stage pipeline |
 | [Trace Memory Lifecycle](examples/trace_memory_lifecycle_with_membase/) | Trace how memory layers build, retrieve, and use memories |
 | [Download Models](examples/download_models/) | Download pre-trained embedding and reranker models from Hugging Face |
 
