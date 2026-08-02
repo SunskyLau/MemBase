@@ -1,0 +1,8 @@
+{
+    "user_id": "guest",
+    "llm_name": "gpt-4.1-mini",
+    "llm_base_url": "https://api.openai.com/v1",
+    "embedding_model_name": "VLLM/Qwen3-Embedding-4B",
+    "embedding_base_url": "http://localhost:8008/v1/embeddings",
+    "save_dir": "examples/evaluate_memory_systems_on_mobilemem/outputs/hipporag"
+}
