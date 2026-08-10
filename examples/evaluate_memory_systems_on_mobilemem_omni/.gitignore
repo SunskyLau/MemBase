@@ -1,0 +1,4 @@
+outputs/
+logs/
+data/*.json
+!data/.gitkeep

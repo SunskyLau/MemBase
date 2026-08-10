@@ -147,6 +147,26 @@ PROMPT_COLLECTIONS = OrderedDict[str, str](
             ),
         ),
 
+        (
+            "mobilemem-omni-judge",
+            (
+                "Your task is to classify an answer to a question as CORRECT or WRONG. "
+                "You are given a question, a gold answer, a generated answer, and optional "
+                "evidence from the user's prior conversations.\n\n"
+                "GRADING RULES:\n"
+                "1. The generated answer must include every key element in the gold answer.\n"
+                "2. Unsupported or irrelevant content that changes the meaning makes the answer WRONG.\n"
+                "3. Equivalent date formats are acceptable when they refer to the same time.\n"
+                "4. Use the evidence only to verify the answer; do not infer unsupported facts.\n\n"
+                "Question: $question\n"
+                "Gold answer: $golden_answers\n"
+                "Evidence: $evidence\n"
+                "Generated answer: $prediction\n\n"
+                "Return exactly one JSON object: {\"label\": \"CORRECT\"} or "
+                "{\"label\": \"WRONG\"}."
+            ),
+        ),
+
         # See https://arxiv.org/pdf/2601.06966. 
         (
             "realmem-lm-score",

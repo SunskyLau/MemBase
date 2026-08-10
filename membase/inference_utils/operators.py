@@ -60,6 +60,7 @@ class LLMExactMatch(NonCachedLLMOperator):
         question_list: list[str], 
         golden_answers_list: list[list[str]], 
         prediction_list: list[str], 
+        evidence_list: list[list[str] | str] | None = None,
         reasoning_process_list: list[str] | None = None
     ) -> list[list[dict[str, str]]]: 
         """Build chat messages for each judgement request.
@@ -87,6 +88,10 @@ class LLMExactMatch(NonCachedLLMOperator):
             question = question_list[i]
             golden_answer_list = golden_answers_list[i]
             prediction = prediction_list[i]
+            evidence = evidence_list[i] if evidence_list is not None else []
+            if isinstance(evidence, list):
+                evidence = "\n".join(str(item) for item in evidence)
+            evidence = evidence or "Not provided."
             reasoning_process = reasoning_process_list[i] if reasoning_process_list is not None else None
             if len(golden_answer_list) == 1:
                 golden_answer_list = golden_answer_list[0]
@@ -99,7 +104,8 @@ class LLMExactMatch(NonCachedLLMOperator):
                         "content": self._prompt.substitute(
                             question=question, 
                             golden_answers=golden_answer_list, 
-                            prediction=prediction
+                            prediction=prediction,
+                            evidence=evidence,
                         )
                     }
                 ]
@@ -111,7 +117,8 @@ class LLMExactMatch(NonCachedLLMOperator):
                             question=question, 
                             golden_answers=golden_answer_list,
                             reasoning_process=reasoning_process,
-                            prediction=prediction
+                            prediction=prediction,
+                            evidence=evidence,
                         )
                     }
                 ]

@@ -1,0 +1,21 @@
+{
+  "user_id": "guest",
+  "retriever_name_or_path": "openai:Qwen3-Embedding-4B",
+  "retriever_dim": 2560,
+  "embedding_kwargs": {
+    "api_key": "EMPTY",
+    "base_url": "http://localhost:8008/v1"
+  },
+  "llm_model": "openai:gpt-4.1-mini",
+  "llm_kwargs": {
+    "api_key": "sk-your-api-key",
+    "base_url": "https://api.openai.com/v1",
+    "temperature": 0.0,
+    "max_tokens": 4096
+  },
+  "query_model": null,
+  "enable_inserts": true,
+  "enable_deletes": true,
+  "query_limit": 5,
+  "save_dir": "examples/evaluate_memory_systems_on_mobilemem_omni/outputs/langmem"
+}

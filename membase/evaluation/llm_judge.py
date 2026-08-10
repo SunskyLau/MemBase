@@ -116,11 +116,13 @@ class LLMJudge(BaseMetric):
             batch_questions = [qa_pairs[i].question for i in indices]
             batch_golden_answers = [qa_pairs[i].golden_answers for i in indices]
             batch_predictions = [predictions[i] for i in indices]
+            batch_evidence = [qa_pairs[i].metadata.get("evidence", []) for i in indices]
 
             judge_responses = judge_operator(
                 batch_questions,
                 batch_golden_answers,
                 batch_predictions,
+                batch_evidence,
                 batch_size=self.judge_batch_size,
                 aggregate=False,
                 **generation_config,
