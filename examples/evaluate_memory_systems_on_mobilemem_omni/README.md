@@ -18,6 +18,8 @@ the method name and its corresponding configuration file.
 | `langmem` | LangMem | `envs/langmem_requirements.txt` | LLM and embedding endpoints |
 | `evermemos` | EverMemOS | `envs/evermemos_requirements.txt` | LLM, embedding, and reranker endpoints |
 
+For other memory methods, see the [MobileMem-Omni evaluation directory](https://github.com/zjunlp/MobileMem/tree/main/omni/eval).
+
 Use a separate Python environment for each method because their dependencies
 may conflict:
 
@@ -170,3 +172,7 @@ outputs/<method>/
 The evaluation uses the same MobileMem-Omni QA prompt and computes MemBase's
 default F1, BLEU-1, and LLM-as-a-Judge metrics. `summarize_results.py` saves both
 overall scores and per-question-type scores for all seven categories.
+
+## Dataset logs
+
+The [MobileMem-Omni Logs](https://drive.google.com/file/d/1ZPaUzsu-gyDXZYqiy2b47v6grnfBg7HW/view?usp=drive_link) contain the experimental logs.
