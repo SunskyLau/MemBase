@@ -75,6 +75,10 @@ class LLMExactMatch(NonCachedLLMOperator):
                 The list of acceptable answer lists for each question.
             prediction_list (`list[str]`): 
                 The list of model predictions.
+            evidence_list (`list[list[str] | str] | None`, optional):
+                The evidence associated with each question. Multiple evidence
+                items are joined with newlines. If omitted or empty,
+                ``"Not provided."`` is used.
             reasoning_process_list (`list[str] | None`, optional): 
                 The list of reasoning processes. If provided, the reasoning process 
                 is included in the prompt.
