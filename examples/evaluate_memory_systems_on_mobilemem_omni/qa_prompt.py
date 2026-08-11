@@ -2,7 +2,7 @@ from string import Template
 
 
 def get_mobilemem_omni_qa_prompt() -> Template:
-    """Return the shared QA prompt for all four textual memory systems."""
+    """Return the shared QA prompt for all five textual memory systems."""
     return Template(
         "Question:\n$question\n"
         "Please answer the question based on the following memories:\n"

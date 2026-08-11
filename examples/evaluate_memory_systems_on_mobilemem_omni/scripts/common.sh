@@ -9,10 +9,11 @@ normalise_method() {
   case "${1:-}" in
     long_context|long-context) echo "long_context" ;;
     rag|naive_rag|naive-rag) echo "rag" ;;
+    mem0) echo "mem0" ;;
     langmem) echo "langmem" ;;
     evermemos) echo "evermemos" ;;
     *)
-      echo "Unknown method: '${1:-}'. Expected long_context, rag, langmem, or evermemos." >&2
+      echo "Unknown method: '${1:-}'. Expected long_context, rag, mem0, langmem, or evermemos." >&2
       return 1
       ;;
   esac
@@ -22,6 +23,7 @@ memory_type_for() {
   case "$1" in
     long_context) echo "Long-Context" ;;
     rag) echo "NaiveRAG" ;;
+    mem0) echo "Mem0" ;;
     langmem) echo "LangMem" ;;
     evermemos) echo "EverMemOS" ;;
   esac
@@ -30,7 +32,7 @@ memory_type_for() {
 default_top_k_for() {
   case "$1" in
     long_context) echo "1" ;;
-    *) echo "30" ;;
+    *) echo "15" ;;
   esac
 }
 

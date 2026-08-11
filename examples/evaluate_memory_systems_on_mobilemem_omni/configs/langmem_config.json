@@ -1,7 +1,7 @@
 {
   "user_id": "guest",
-  "retriever_name_or_path": "openai:Qwen3-Embedding-4B",
-  "retriever_dim": 2560,
+  "retriever_name_or_path": "openai:all-MiniLM-L6-v2",
+  "retriever_dim": 384,
   "embedding_kwargs": {
     "api_key": "EMPTY",
     "base_url": "http://localhost:8008/v1"

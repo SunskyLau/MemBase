@@ -50,7 +50,7 @@
     "reranker_fallback_threshold": 0.3,
     "reranker_concurrent_batches": 5,
     "use_multi_query": true,
-    "final_top_k": 30,
+    "final_top_k": 15,
     "sufficiency_check_docs": 10
   },
   "extraction_config": {

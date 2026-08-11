@@ -1,10 +1,10 @@
 # Evaluate Textual Memory Systems on MobileMem-Omni
 
-This example runs Long Context, NaiveRAG, LangMem, and EverMemOS on
+This example runs Long Context, NaiveRAG, Mem0, LangMem, and EverMemOS on
 [MobileMem-Omni](https://github.com/zjunlp/MobileMem) through MemBase's shared
 construction, retrieval, question-answering, and evaluation pipeline.
 
-The four methods use the same prepared dataset, QA prompt, judge, metrics, and
+The five methods use the same prepared dataset, QA prompt, judge, metrics, and
 stage scripts. Their memory construction and retrieval behaviour is selected by
 the method name and its corresponding configuration file.
 
@@ -14,6 +14,7 @@ the method name and its corresponding configuration file.
 |---|---|---|---|
 | `long_context` | Long-Context | `envs/long_context_requirements.txt` | None for construction/retrieval |
 | `rag` | NaiveRAG | `envs/rag_requirements.txt` | Embedding endpoint |
+| `mem0` | Mem0 | `envs/mem0_requirements.txt` | LLM and embedding endpoints |
 | `langmem` | LangMem | `envs/langmem_requirements.txt` | LLM and embedding endpoints |
 | `evermemos` | EverMemOS | `envs/evermemos_requirements.txt` | LLM, embedding, and reranker endpoints |
 
@@ -44,7 +45,7 @@ python omni/eval/eval/Jsonl2Locomo.py \
 ```
 
 Do not pass `--no-caption-in-text` when category-6 visual reasoning questions
-are included. These four methods are textual and consume image information only
+are included. These five methods are textual and consume image information only
 through captions embedded in the conversation text.
 
 ## 2. Merge and validate the converted files
@@ -73,15 +74,14 @@ Edit the selected method config under `configs/` and replace all API-key and
 endpoint placeholders. Also edit `configs/api_config.json`; it supplies the QA
 model and LLM judge endpoints.
 
-NaiveRAG, LangMem, and EverMemOS use an OpenAI-compatible embedding endpoint.
-The provided configs expect Qwen3-Embedding-4B on port 8008:
+NaiveRAG, Mem0, LangMem, and EverMemOS use an OpenAI-compatible embedding endpoint.
+The provided configs expect all-MiniLM-L6-v2 on port 8008:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 vllm serve pretrained_models/Qwen3-Embedding-4B \
+CUDA_VISIBLE_DEVICES=0 vllm serve pretrained_models/all-MiniLM-L6-v2 \
   --port 8008 \
-  --served-model-name Qwen3-Embedding-4B \
-  --gpu-memory-utilization 0.5 \
-  --hf_overrides '{"is_matryoshka": true}'
+  --served-model-name all-MiniLM-L6-v2 \
+  --gpu-memory-utilization 0.5
 ```
 
 EverMemOS additionally expects Qwen3-Reranker-4B on port 8001:
@@ -108,6 +108,7 @@ The other method entry points are:
 
 ```bash
 bash examples/evaluate_memory_systems_on_mobilemem_omni/run_naive_rag.sh construction
+bash examples/evaluate_memory_systems_on_mobilemem_omni/run_mem0.sh construction
 bash examples/evaluate_memory_systems_on_mobilemem_omni/run_langmem.sh construction
 bash examples/evaluate_memory_systems_on_mobilemem_omni/run_evermemos.sh construction
 ```
@@ -134,18 +135,23 @@ Supported environment overrides include:
 DATASET_PATH=/path/to/mobilemem_omni_locomo.json
 NUM_WORKERS=8
 SAMPLE_SIZE=2
-TOP_K=10
+TOP_K=15
 START_IDX=0
 END_IDX=2
-QA_MODEL=gpt-4.1-mini
-JUDGE_MODEL=gpt-4.1-mini
+QA_MODEL=gpt-5.4-mini
+JUDGE_MODEL=Qwen3-14B
 QA_BATCH_SIZE=4
 JUDGE_BATCH_SIZE=4
 RERUN=0
 ```
 
+Run evaluation once with each QA backbone. GPT-5.4-mini is the default; use
+`QA_MODEL=Qwen3-VL-8B-Instruct` for the second run. Preserve or rename the first
+evaluation and summary files before the second run because both runs otherwise
+write to the same output paths.
+
 Keep `TOP_K`, `START_IDX`, and `END_IDX` aligned between search and evaluation.
-Long Context defaults to `top_k=1`; the other methods default to `top_k=30`.
+Long Context defaults to `top_k=1`; the other methods default to `top_k=15`.
 The scripts automatically set `MEMORY_LANGUAGE=zh` for EverMemOS unless it is
 already defined.
 
