@@ -165,3 +165,6 @@ The evaluation stage uses the retrieved memories to answer MobileMem questions a
 ```
 
 Set `qa_model`, `judge_model`, `qa_batch_size`, and `judge_batch_size` near the top of `run_evaluation.sh` according to the models available from the endpoints in `configs/api_config.json`. Keep `METHOD`, `top_k`, `start_idx`, and `end_idx` aligned with the retrieval run. Evaluation runs in the background and logs to `examples/evaluate_memory_systems_on_mobilemem/logs/<METHOD>/evaluation.log`.
+
+> [!NOTE]
+> We also provide execution logs from our baseline runs on [Google Drive](https://drive.google.com/drive/folders/1beKoGFSIJDLjfUWDmlKtz7a3uk2IxGJf?usp=sharing) for reference.
