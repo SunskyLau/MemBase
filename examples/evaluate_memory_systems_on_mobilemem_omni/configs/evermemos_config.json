@@ -2,7 +2,7 @@
   "user_id": "guest",
   "llm_config": {
     "provider": "openai",
-    "model": "gpt-4.1-mini",
+    "model": "gpt-5.4-mini",
     "api_key": "sk-your-api-key",
     "base_url": "https://api.openai.com/v1",
     "temperature": 0.3,
@@ -10,10 +10,10 @@
   },
   "embedding_config": {
     "provider": "vllm",
-    "model": "Qwen3-Embedding-4B",
+    "model": "all-MiniLM-L6-v2",
     "api_key": "EMPTY",
     "base_url": "http://localhost:8008/v1",
-    "embedding_dims": 2560
+    "embedding_dims": 384
   },
   "boundary_config": {
     "hard_token_limit": 8192,

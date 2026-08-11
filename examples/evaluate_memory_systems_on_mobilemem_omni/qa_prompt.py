@@ -4,11 +4,11 @@ from string import Template
 def get_mobilemem_omni_qa_prompt() -> Template:
     """Return the shared QA prompt for all four textual memory systems."""
     return Template(
-        "Question:\n$question\n\n"
-        "Please answer the question using only the following retrieved memories:\n"
-        "$context\n\n"
-        "Answer rules:\n"
-        "1. If options are present, answer with the original option text.\n"
-        "2. For multiple-select questions, include every correct option.\n"
-        "3. For open-ended questions, give a direct answer without unsupported details."
+        "Question:\n$question\n"
+        "Please answer the question based on the following memories:\n"
+        "$context\n"
+        "Answer Rules:\n"
+        "1. If options are provided in the question, use the original option text as your answer.\n"
+        "2. For multiple-choice questions (multiple-select), select all correct options.\n"
+        "3. For open-ended questions, respond freely."
     )
