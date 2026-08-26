@@ -1,0 +1,6 @@
+{
+  "user_id": "guest",
+  "context_window": 200000,
+  "llm_model": "gpt-4.1-mini",
+  "save_dir": "examples/evaluate_baselines/outputs/locomo/long_context"
+}
