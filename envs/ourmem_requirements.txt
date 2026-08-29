@@ -1,0 +1,7 @@
+# OurMem 当前直接使用的数据建模依赖。
+pydantic==2.13.4
+
+# MemBase 运行器、词元统计和执行追踪所需的基础依赖。
+openai==3.3.1
+litellm==1.75.9
+smartcomment==0.1.2
