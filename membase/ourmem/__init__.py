@@ -5,9 +5,11 @@
 """
 
 from .models import AtomicFact, EvidenceQuote, FactStatus
+from .store import OurMemStore
 
 __all__ = [
     "AtomicFact",
     "EvidenceQuote",
     "FactStatus",
+    "OurMemStore",
 ]
