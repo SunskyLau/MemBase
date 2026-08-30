@@ -20,6 +20,7 @@ from .models import (
     Justification,
 )
 from .retriever import SemanticCandidate
+from .structured_output import request_validated_json
 
 
 JUSTIFICATION_INDUCTION_PROMPT = """You induce reusable derived memory from a bounded support set.
@@ -289,17 +290,15 @@ class JustificationInducer:
         ))
 
     def _call_json(self, prompt: str, request: dict) -> dict:
-        response = self._interface(
+        return request_validated_json(
+            self._interface,
             [
-                [
-                    {"role": "system", "content": prompt},
-                    {
-                        "role": "user",
-                        "content": json.dumps(request, ensure_ascii=False, indent=2),
-                    },
-                ]
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(request, ensure_ascii=False, indent=2),
+                },
             ],
-            temperature=0.0,
-            stream=False,
+            lambda output: output,
+            context="justification induction",
         )
-        return json.loads(response["content"])

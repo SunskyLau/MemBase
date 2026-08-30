@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from ..inference_utils.backends import get_interface_for_inference
 from .models import AtomicFact, EvidenceQuote, FactUpdate, FactUpdateAction
+from .structured_output import request_validated_json
 
 
 FACT_RECONCILIATION_PROMPT = """You reconcile one newly stated atomic fact with current active facts.
@@ -85,32 +86,33 @@ class FactReconciler:
                 self._serialize_fact(fact) for fact in candidate_facts
             ],
         }
-        response = self._interface(
-            [
-                [
-                    {"role": "system", "content": FACT_RECONCILIATION_PROMPT},
-                    {
-                        "role": "user",
-                        "content": json.dumps(request, ensure_ascii=False, indent=2),
-                    },
-                ]
-            ],
-            temperature=0.0,
-            stream=False,
-        )
-        raw_update = json.loads(response["content"])
-        raw_update["action"] = raw_update["action"].lower()
-        update = FactUpdate.model_validate(raw_update)
-
         candidate_ids = {fact.id for fact in candidate_facts}
-        if (
-            update.target_fact_id is not None
-            and update.target_fact_id not in candidate_ids
-        ):
-            raise ValueError(
-                f"Target fact '{update.target_fact_id}' is not a candidate"
-            )
-        return update
+
+        def validate_update(raw: dict[str, Any]) -> FactUpdate:
+            normalized = dict(raw)
+            normalized["action"] = normalized["action"].lower()
+            update = FactUpdate.model_validate(normalized)
+            if (
+                update.target_fact_id is not None
+                and update.target_fact_id not in candidate_ids
+            ):
+                raise ValueError(
+                    f"Target fact '{update.target_fact_id}' is not a candidate"
+                )
+            return update
+
+        return request_validated_json(
+            self._interface,
+            [
+                {"role": "system", "content": FACT_RECONCILIATION_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(request, ensure_ascii=False, indent=2),
+                },
+            ],
+            validate_update,
+            context="fact reconciliation",
+        )
 
     @staticmethod
     def _serialize_fact(fact: AtomicFact) -> dict[str, object]:

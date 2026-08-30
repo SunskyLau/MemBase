@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from ..inference_utils.backends import get_interface_for_inference
 from ..model_types.dataset import Message
 from .models import AtomicFact, EvidenceQuote
+from .structured_output import request_validated_json
 
 
 FACT_EXTRACTION_PROMPT = """You extract memory-relevant atomic facts from conversation messages.
@@ -120,20 +121,28 @@ class FactExtractor:
                 ),
             },
         ]
-        response = self._interface(
-            [request_messages],
-            temperature=0.0,
-            stream=False,
-        )
-        output = FactExtractionOutput.model_validate(
-            json.loads(response["content"])
-        )
-
         messages_by_id = {message.id: message for message in messages}
         message_indices = {
             message.id: message_offset + index
             for index, message in enumerate(messages)
         }
+
+        def validate_output(raw: dict[str, Any]) -> FactExtractionOutput:
+            output = FactExtractionOutput.model_validate(raw)
+            for fact in output.facts:
+                message = messages_by_id[fact.message_id]
+                if fact.quote not in message.content:
+                    raise ValueError(
+                        f"Quote is not present in message '{message.id}'."
+                    )
+            return output
+
+        output = request_validated_json(
+            self._interface,
+            request_messages,
+            validate_output,
+            context="fact extraction",
+        )
         extracted_facts = sorted(
             output.facts,
             key=lambda fact: message_indices[fact.message_id],
@@ -142,11 +151,6 @@ class FactExtractor:
         results = []
         for extracted_fact in extracted_facts:
             message = messages_by_id[extracted_fact.message_id]
-            if extracted_fact.quote not in message.content:
-                raise ValueError(
-                    f"Quote is not present in message '{message.id}'."
-                )
-
             evidence_quote = EvidenceQuote(
                 message_id=message.id,
                 session_id=session_id,

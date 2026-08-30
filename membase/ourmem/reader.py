@@ -56,6 +56,7 @@ class MemoryReader:
                             "mention_time": fact.mention_time,
                             "event_time": fact.event_time,
                             "evidence_quote_ids": [quote.id],
+                            "source_message_ids": [quote.message_id],
                         },
                     )
                 )
@@ -67,6 +68,7 @@ class MemoryReader:
             )
             support_lines = []
             evidence_quote_ids = []
+            source_message_ids = []
             for fact_id in supporting_fact_ids:
                 fact = self.fact_store.get_fact(fact_id)
                 quote = self.fact_store.get_evidence_quote(
@@ -76,6 +78,7 @@ class MemoryReader:
                     "- " + self._format_fact(fact, quote).replace("\n", "\n  ")
                 )
                 evidence_quote_ids.append(quote.id)
+                source_message_ids.append(quote.message_id)
             entries.append(
                 MemoryEntry(
                     content=claim.clause.value.proposition,
@@ -93,6 +96,9 @@ class MemoryReader:
                         "score": match.score,
                         "supporting_fact_ids": supporting_fact_ids,
                         "evidence_quote_ids": evidence_quote_ids,
+                        "source_message_ids": list(
+                            dict.fromkeys(source_message_ids)
+                        ),
                     },
                 )
             )

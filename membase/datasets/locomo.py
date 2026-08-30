@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 from .base import MemBaseDataset
 from ..model_types.dataset import (
@@ -8,6 +9,15 @@ from ..model_types.dataset import (
     Message,
 )
 from typing import Any, Self
+
+
+def _parse_evidence_ids(value: str) -> list[str]:
+    """Recover one or more dialog ids from LoCoMo's occasionally malformed field."""
+
+    matches = re.findall(r"D:?(\d+):(\d+)", value)
+    if not matches:
+        return [value.strip()]
+    return [f"D{int(session)}:{int(turn)}" for session, turn in matches]
 
 
 class LoCoMo(MemBaseDataset):
@@ -118,7 +128,8 @@ class LoCoMo(MemBaseDataset):
                     "category_id": category,
                     "evidence": [
                         f"U{sample_idx}:{evidence}"
-                        for evidence in qa["evidence"]
+                        for evidence_group in qa["evidence"]
+                        for evidence in _parse_evidence_ids(evidence_group)
                     ],
                     "speaker_names": [speaker_a, speaker_b],
                 }
