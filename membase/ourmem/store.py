@@ -35,6 +35,11 @@ class OurMemStore:
 
         return self._evidence_quotes[evidence_quote_id]
 
+    def get_evidence_quotes(self) -> list[EvidenceQuote]:
+        """按照写入顺序返回全部证据原文（evidence quote）。"""
+
+        return list(self._evidence_quotes.values())
+
     def add_fact(self, fact: AtomicFact) -> None:
         """添加一条普通的新原子事实（atomic fact）。
 
@@ -69,7 +74,15 @@ class OurMemStore:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        data = {
+        path.write_text(
+            json.dumps(self.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def to_dict(self) -> dict[str, list[dict]]:
+        """返回可以直接写入 JSON 的事实存储状态。"""
+
+        return {
             "evidence_quotes": [
                 evidence_quote.model_dump(mode="json")
                 for evidence_quote in self._evidence_quotes.values()
@@ -79,10 +92,6 @@ class OurMemStore:
                 for fact in self._facts.values()
             ],
         }
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
 
     @classmethod
     def load(cls, path: str | Path) -> OurMemStore:
@@ -93,6 +102,12 @@ class OurMemStore:
         """
 
         data = json.loads(Path(path).read_text(encoding="utf-8"))
+        return cls.from_dict(data)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> OurMemStore:
+        """从 JSON 对象恢复事实存储状态。"""
+
         store = cls()
 
         for raw_evidence_quote in data["evidence_quotes"]:
@@ -130,7 +145,11 @@ class OurMemStore:
         old_fact.status = FactStatus.SUPERSEDED
         self._facts[new_fact.id] = new_fact
 
-    def retract_fact(self, fact_id: str) -> None:
+    def retract_fact(
+        self,
+        fact_id: str,
+        evidence_quote_id: str | None = None,
+    ) -> None:
         """撤回一条当前有效的原子事实（atomic fact），但保留历史记录。"""
 
         fact = self.get_fact(fact_id)
@@ -139,4 +158,7 @@ class OurMemStore:
                 f"Only an active fact can be retracted, but '{fact_id}' "
                 f"is '{fact.status.value}'."
             )
+        if evidence_quote_id is not None:
+            self.get_evidence_quote(evidence_quote_id)
         fact.status = FactStatus.RETRACTED
+        fact.retracted_by_evidence_quote_id = evidence_quote_id

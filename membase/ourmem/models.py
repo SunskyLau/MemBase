@@ -167,6 +167,10 @@ class AtomicFact(OurMemModel):
             "（atomic fact）。普通新增事实保持为空。"
         ),
     )
+    retracted_by_evidence_quote_id: str | None = Field(
+        default=None,
+        description="明确撤回这条事实的证据原文（evidence quote）标识。",
+    )
 
     @field_validator("entities")
     @classmethod

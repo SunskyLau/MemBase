@@ -107,10 +107,14 @@ class ClaimMemory:
         self.fact_store.supersede_fact(old_fact_id, new_fact)
         return self.on_version_changed(old_fact_id)
 
-    def retract_fact(self, fact_id: str) -> MaintenanceReport:
+    def retract_fact(
+        self,
+        fact_id: str,
+        evidence_quote_id: str | None = None,
+    ) -> MaintenanceReport:
         """撤回一条原子事实（atomic fact），并立即维护下游主张。"""
 
-        self.fact_store.retract_fact(fact_id)
+        self.fact_store.retract_fact(fact_id, evidence_quote_id)
         return self.on_version_changed(fact_id)
 
     def on_version_changed(self, version_id: str) -> MaintenanceReport:
@@ -165,6 +169,105 @@ class ClaimMemory:
             self._claim_versions[version_id]
             for version_id in self._claim_version_ids_by_key.get(claim_key, [])
         ]
+
+    def get_current_claims(self) -> list[ClaimVersion]:
+        """按照创建顺序返回全部当前派生主张（derived claim）。"""
+
+        return [
+            claim_version
+            for claim_version in self._claim_versions.values()
+            if self._current_claim_version_id.get(claim_version.claim_key)
+            == claim_version.id
+        ]
+
+    def get_supporting_fact_ids(self, claim_version_id: str) -> list[str]:
+        """递归展开一个主张版本实际使用的原子事实（atomic fact）。"""
+
+        claim_version = self._claim_versions[claim_version_id]
+        return self._supporting_fact_ids_from_justification(
+            claim_version.materialized_from_justification_id
+        )
+
+    def get_current_supporting_fact_ids(self, claim_key: str) -> list[str]:
+        """展开一个当前主张正在使用的原子事实（atomic fact）。"""
+
+        return self._supporting_fact_ids_from_justification(
+            self._current_justification_id_by_claim[claim_key]
+        )
+
+    def _supporting_fact_ids_from_justification(
+        self,
+        justification_id: str,
+    ) -> list[str]:
+        fact_ids: list[str] = []
+
+        def expand_reference(version_id: str) -> None:
+            claim_version = self._claim_versions.get(version_id)
+            if claim_version is None:
+                fact_ids.append(version_id)
+                return
+            justification = self._justifications[
+                claim_version.materialized_from_justification_id
+            ]
+            for support_id in justification.support_version_ids:
+                expand_reference(support_id)
+
+        justification = self._justifications[justification_id]
+        for support_id in justification.support_version_ids:
+            expand_reference(support_id)
+        return list(dict.fromkeys(fact_ids))
+
+    def to_dict(self) -> dict:
+        """返回可以直接写入 JSON 的依据与主张状态。"""
+
+        return {
+            "justifications": [
+                item.model_dump(mode="json")
+                for item in self._justifications.values()
+            ],
+            "claim_versions": [
+                item.model_dump(mode="json")
+                for item in self._claim_versions.values()
+            ],
+            "current_justification_id_by_claim": dict(
+                self._current_justification_id_by_claim
+            ),
+            "current_claim_version_id": dict(self._current_claim_version_id),
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        fact_store: OurMemStore,
+        data: dict,
+    ) -> ClaimMemory:
+        """从 JSON 对象恢复成立依据（justification）与主张状态。"""
+
+        memory = cls(fact_store)
+        for raw_justification in data["justifications"]:
+            justification = Justification.model_validate(raw_justification)
+            memory._justifications[justification.id] = justification
+        for raw_claim_version in data["claim_versions"]:
+            claim_version = ClaimVersion.model_validate(raw_claim_version)
+            memory._claim_versions[claim_version.id] = claim_version
+            memory._claim_version_ids_by_key[claim_version.claim_key].append(
+                claim_version.id
+            )
+        memory._current_justification_id_by_claim.update(
+            data["current_justification_id_by_claim"]
+        )
+        memory._current_claim_version_id.update(data["current_claim_version_id"])
+
+        for justification_id in memory._current_justification_id_by_claim.values():
+            justification = memory._justifications[justification_id]
+            for version_id in (
+                justification.support_version_ids
+                + justification.explicit_defeater_version_ids
+            ):
+                memory._justification_ids_by_reference[version_id].add(
+                    justification.id
+                )
+        return memory
 
     def get_claim_level(self, claim_key: str) -> int | None:
         """返回当前单一支持路径形成的只读层级。"""
