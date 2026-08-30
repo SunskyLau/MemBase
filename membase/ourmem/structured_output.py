@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any, Callable, TypeVar
 
-from openai import APIError
+from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
 
 
 T = TypeVar("T")
@@ -23,7 +23,9 @@ def request_validated_json(
     """Request JSON and retry when parsing or schema validation fails."""
 
     conversation = list(messages)
-    for attempt in range(1, max_attempts + 1):
+    attempt = 1
+    api_failures = 0
+    while attempt <= max_attempts:
         try:
             response = interface(
                 [conversation],
@@ -31,16 +33,21 @@ def request_validated_json(
                 stream=False,
                 max_tokens=max_tokens,
             )
-        except APIError as error:
-            if attempt == max_attempts:
-                raise
-            delay = min(30, 2 ** attempt)
+        except (
+            APIConnectionError,
+            APITimeoutError,
+            InternalServerError,
+            RateLimitError,
+        ) as error:
+            api_failures += 1
+            delay = min(60, 2 ** min(api_failures, 6))
             print(
                 f"API request failed for {context}; retrying in {delay}s "
-                f"({attempt}/{max_attempts - 1}): {error}"
+                f"(transient failure {api_failures}): {error}"
             )
             time.sleep(delay)
             continue
+        api_failures = 0
         content = response["content"]
         try:
             return validator(_parse_json_object(content))
@@ -64,6 +71,7 @@ def request_validated_json(
                     },
                 ]
             )
+            attempt += 1
     raise RuntimeError("Structured-output retry loop ended unexpectedly")
 
 

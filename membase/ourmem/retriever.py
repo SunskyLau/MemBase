@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import sqrt
+import time
 from typing import Callable
 
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
 
 from .models import AtomicFact, ClaimVersion
 
@@ -43,10 +50,28 @@ class OpenAIEmbedder:
     def __call__(self, texts: list[str]) -> list[list[float]]:
         embeddings = []
         for start in range(0, len(texts), self.batch_size):
-            response = self._client.embeddings.create(
-                model=self.model_name,
-                input=texts[start : start + self.batch_size],
-            )
+            failures = 0
+            while True:
+                try:
+                    response = self._client.embeddings.create(
+                        model=self.model_name,
+                        input=texts[start : start + self.batch_size],
+                    )
+                    break
+                except (
+                    APIConnectionError,
+                    APITimeoutError,
+                    InternalServerError,
+                    RateLimitError,
+                ) as error:
+                    failures += 1
+                    delay = min(60, 2 ** min(failures, 6))
+                    print(
+                        "Embedding API request failed; "
+                        f"retrying in {delay}s (transient failure {failures}): "
+                        f"{error}"
+                    )
+                    time.sleep(delay)
             embeddings.extend(
                 item.embedding
                 for item in sorted(response.data, key=lambda item: item.index)

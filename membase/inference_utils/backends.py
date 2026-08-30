@@ -1,5 +1,12 @@
-from openai import OpenAI  
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
 from concurrent.futures import ThreadPoolExecutor
+import time
 import warnings
 from typing import Any, Callable
 
@@ -12,7 +19,7 @@ class OpenAIClient(OpenAI):
         messages: list[dict[str, Any]], 
         model: str = "gpt-4.1", 
         post_processor: Callable[[str], Any] | None = None,
-        max_tolerance: int = 8,
+        max_tolerance: int = 3,
         temperature: float | None = None, 
         top_p: float | None = None,
         stream: bool = True, 
@@ -48,14 +55,32 @@ class OpenAIClient(OpenAI):
                 reasoning content if the model returns reasoning tokens.
         """
         client = self.with_options(max_retries=max_tolerance)
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            top_p=top_p,
-            stream=stream,
-            **kwargs
-        )
+        failures = 0
+        while True:
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stream=stream,
+                    **kwargs
+                )
+                break
+            except (
+                APIConnectionError,
+                APITimeoutError,
+                InternalServerError,
+                RateLimitError,
+            ) as error:
+                failures += 1
+                delay = min(60, 2 ** min(failures, 6))
+                print(
+                    "LLM API request failed; "
+                    f"retrying in {delay}s (transient failure {failures}): "
+                    f"{error}"
+                )
+                time.sleep(delay)
 
         content = ''
         reasoning_content = None
@@ -104,7 +129,7 @@ def openai_api_batch_inference(
     messages_list: list[list[dict[str, Any]]], 
     model: str = "gpt-4.1", 
     post_processor: Callable[[str], Any] | None = None,
-    max_tolerance: int = 8,
+    max_tolerance: int = 3,
     temperature: float = 0.75, 
     top_p: float = 0.95,
     stream: bool = True, 
