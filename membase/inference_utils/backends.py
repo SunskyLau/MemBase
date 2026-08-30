@@ -28,8 +28,9 @@ class OpenAIClient(OpenAI):
             post_processor (`Callable[[str], Any] | None`, optional): 
                 An optional callable applied to the raw response content. 
                 It is useful for parsing the response content, computing the cost or extracting related metadata.
-            max_tolerance (`int`, defaults to `3`): 
-                Maximum number of retry attempts.
+            max_tolerance (`int`, defaults to `3`):
+                Maximum number of retries after the initial request. The OpenAI client
+                applies exponential backoff between retries.
             temperature (`float`, optional): 
                 Sampling temperature.
             top_p (`float`, optional): 
@@ -46,49 +47,47 @@ class OpenAIClient(OpenAI):
                 A dictionary containing raw text, post-processed result, and optionally 
                 reasoning content if the model returns reasoning tokens.
         """
-        response_content = None 
-        counter = 0 
-        content = ''
-        reasoning_content = None 
+        client = self.with_options(max_retries=max_tolerance)
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            top_p=top_p,
+            stream=stream,
+            **kwargs
+        )
 
-        while response_content is None and counter <= max_tolerance:
-            try:
-                response = self.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    top_p=top_p,
-                    stream=stream,
-                    **kwargs
-                )
-                if stream:
-                    chunks = []
-                    reasoning_chunks = [] 
-                    for chunk in response:
-                        if len(chunk.choices) > 0:
-                            if hasattr(chunk.choices[0].delta, "content"):
-                                chunks.append(chunk.choices[0].delta.content or '')
-                            if hasattr(chunk.choices[0].delta, "reasoning_content"):
-                                reasoning_chunks.append(chunk.choices[0].delta.reasoning_content or '')
-                        else:
-                            warnings.warn(
-                                "Find a chunk without `choices` attribute. "
-                                "The model may reject to answer the question. "
-                                "Please check the question and the model you use.",
-                                UserWarning
-                            )
-                    content = ''.join(chunks)
-                    if len(reasoning_chunks) > 0:
-                        reasoning_content = ''.join(reasoning_chunks)
+        content = ''
+        reasoning_content = None
+        if stream:
+            chunks = []
+            reasoning_chunks = []
+            for chunk in response:
+                if len(chunk.choices) > 0:
+                    if hasattr(chunk.choices[0].delta, "content"):
+                        chunks.append(chunk.choices[0].delta.content or '')
+                    if hasattr(chunk.choices[0].delta, "reasoning_content"):
+                        reasoning_chunks.append(
+                            chunk.choices[0].delta.reasoning_content or ''
+                        )
                 else:
-                    content = response.choices[0].message.content
-                    if hasattr(response.choices[0].message, "reasoning_content"):
-                        reasoning_content = response.choices[0].message.reasoning_content 
-            except Exception as e:
-                print(e)
-            finally: 
-                response_content = content if post_processor is None else post_processor(content)
-                counter += 1
+                    warnings.warn(
+                        "Find a chunk without `choices` attribute. "
+                        "The model may reject to answer the question. "
+                        "Please check the question and the model you use.",
+                        UserWarning
+                    )
+            content = ''.join(chunks)
+            if len(reasoning_chunks) > 0:
+                reasoning_content = ''.join(reasoning_chunks)
+        else:
+            content = response.choices[0].message.content
+            if hasattr(response.choices[0].message, "reasoning_content"):
+                reasoning_content = response.choices[0].message.reasoning_content
+
+        response_content = (
+            content if post_processor is None else post_processor(content)
+        )
         
         outputs = {
             "content": content, 
@@ -125,8 +124,8 @@ def openai_api_batch_inference(
             The model identifier.
         post_processor (`Callable[[str], Any] | None`, optional): 
             An optional callable applied to each raw response content.
-        max_tolerance (`int`, defaults to `3`): 
-            Maximum number of retry attempts per request.
+        max_tolerance (`int`, defaults to `3`):
+            Maximum number of retries after each initial request.
         temperature (`float`, defaults to `0.75`): 
             Sampling temperature.
         top_p (`float`, defaults to `0.95`): 

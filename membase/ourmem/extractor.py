@@ -31,8 +31,15 @@ Rules:
 - Return zero or more facts.
 - Ignore greetings, acknowledgements, and content with no factual, preference, event, plan,
   commitment, or update information.
+- Treat the input as a chronological record, not as a summary of the current state.
+- Extract every fact as it was stated in its source message, even if a later message corrects,
+  contradicts, supersedes, or retracts it.
+- Do not omit, merge, or rewrite an earlier fact using information from a later message.
+- Return facts in the same order as their source messages.
 - Keep both long-lived and temporary facts when they may matter in later interactions.
 - Each fact must express one independently updateable proposition.
+- If one message contains multiple independently updateable propositions, extract each
+  proposition as a separate fact.
 - The quote must be copied verbatim from exactly one source message.
 - The fact may normalize wording, but must not add information unsupported by the quote.
 - Preserve uncertainty in the fact content. Do not turn "maybe" into a certainty.
@@ -127,9 +134,13 @@ class FactExtractor:
             message.id: message_offset + index
             for index, message in enumerate(messages)
         }
+        extracted_facts = sorted(
+            output.facts,
+            key=lambda fact: message_indices[fact.message_id],
+        )
 
         results = []
-        for extracted_fact in output.facts:
+        for extracted_fact in extracted_facts:
             message = messages_by_id[extracted_fact.message_id]
             if extracted_fact.quote not in message.content:
                 raise ValueError(
