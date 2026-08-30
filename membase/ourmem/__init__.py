@@ -4,12 +4,14 @@
 会在后续单独放入 ``membase.layers``，避免把研究方法和评测接口混在一起。
 """
 
+from .extractor import FactExtractor
 from .models import AtomicFact, EvidenceQuote, FactStatus
 from .store import OurMemStore
 
 __all__ = [
     "AtomicFact",
     "EvidenceQuote",
+    "FactExtractor",
     "FactStatus",
     "OurMemStore",
 ]
