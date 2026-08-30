@@ -129,16 +129,27 @@ class MemoryWriter:
         include_invalid_claims: bool,
         hard_changed_version_id: str | None,
     ) -> None:
-        current_claims = [
-            claim
-            for claim in self.claim_memory.get_current_claims()
-            if include_invalid_claims or claim.status is ClaimStatus.VALID
-            if hard_changed_version_id is None
-            or hard_changed_version_id
-            not in self.claim_memory.get_current_supporting_fact_ids(
-                claim.claim_key
-            )
-        ]
+        current_claims = []
+        for claim in self.claim_memory.get_current_claims():
+            current = self.claim_memory.get_current_justification(claim.claim_key)
+            if (
+                hard_changed_version_id is not None
+                and hard_changed_version_id
+                in self.claim_memory.get_current_supporting_fact_ids(
+                    claim.claim_key
+                )
+            ):
+                continue
+            if claim.status is ClaimStatus.VALID:
+                current_claims.append(claim)
+                continue
+            if (
+                include_invalid_claims
+                and hard_changed_version_id
+                in current.explicit_defeater_version_ids
+                and self.claim_memory.current_supports_are_active(claim.claim_key)
+            ):
+                current_claims.append(claim)
         support_facts_by_claim = {
             claim.claim_key: [
                 self.fact_store.get_fact(fact_id)

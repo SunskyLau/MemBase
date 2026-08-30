@@ -195,6 +195,15 @@ class ClaimMemory:
             self._current_justification_id_by_claim[claim_key]
         )
 
+    def current_supports_are_active(self, claim_key: str) -> bool:
+        """判断当前成立依据（justification）的全部直接支持是否仍有效。"""
+
+        justification = self.get_current_justification(claim_key)
+        return all(
+            self._is_reference_active(version_id)
+            for version_id in justification.support_version_ids
+        )
+
     def _supporting_fact_ids_from_justification(
         self,
         justification_id: str,
