@@ -240,7 +240,7 @@ class ClaimMemory:
             justification.support_version_ids
             + justification.explicit_defeater_version_ids
         ):
-            self._justification_ids_by_reference[version_id].discard(justification.id)
+            self._justification_ids_by_reference[version_id].remove(justification.id)
 
     def _refresh_justification_status(
         self,
@@ -295,6 +295,7 @@ class ClaimMemory:
                 kind=justification.conclusion_kind,
                 clause=justification.clause,
                 status=new_status,
+                materialized_from_justification_id=justification.id,
                 supersedes_version_id=(
                     old_version.id if old_version is not None else None
                 ),

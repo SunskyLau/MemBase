@@ -178,6 +178,31 @@ class AtomicFact(OurMemModel):
         return list(dict.fromkeys(values))
 
 
+class FactUpdateAction(str, Enum):
+    """新原子事实（atomic fact）相对当前事实产生的版本操作。"""
+
+    ADD = "add"
+    DUPLICATE = "duplicate"
+    SUPERSEDE = "supersede"
+    RETRACT = "retract"
+
+
+class FactUpdate(OurMemModel):
+    """事实协调器（fact reconciler）输出的确定性操作。"""
+
+    action: FactUpdateAction
+    target_fact_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> FactUpdate:
+        if self.action is FactUpdateAction.ADD:
+            if self.target_fact_id is not None:
+                raise ValueError("ADD cannot have a target fact")
+        elif self.target_fact_id is None:
+            raise ValueError(f"{self.action.value.upper()} requires a target fact")
+        return self
+
+
 class ClaimKind(str, Enum):
     """首版派生主张（derived claim）的两种层次。"""
 
@@ -221,21 +246,9 @@ class ClaimValue(OurMemModel):
 
 
 class ClaimClause(OurMemModel):
-    """一条成立依据（justification）在有限时间内支持的结论。"""
+    """一条成立依据（justification）支持的规范结论。"""
 
     value: ClaimValue
-    valid_from: int = Field(
-        description="有效区间起点，使用会话或事件的离散逻辑时间。",
-    )
-    valid_to: int = Field(
-        description="有效区间终点；区间采用左闭右开形式。",
-    )
-
-    @model_validator(mode="after")
-    def _validate_interval(self) -> ClaimClause:
-        if self.valid_to <= self.valid_from:
-            raise ValueError("valid_to must be greater than valid_from")
-        return self
 
 
 class ClaimVersion(OurMemModel):
@@ -252,6 +265,7 @@ class ClaimVersion(OurMemModel):
     kind: ClaimKind
     clause: ClaimClause
     status: ClaimStatus
+    materialized_from_justification_id: str = Field(min_length=1)
     supersedes_version_id: str | None = None
 
 
@@ -272,8 +286,6 @@ class Justification(OurMemModel):
     support_version_ids: list[str] = Field(min_length=2, max_length=3)
     explicit_defeater_version_ids: list[str] = Field(default_factory=list)
     clause: ClaimClause
-    inducer_version: str = Field(default="manual-v0", min_length=1)
-    verifier_version: str = Field(default="manual-v0", min_length=1)
     status: JustificationStatus = JustificationStatus.ACTIVE
     supersedes_justification_id: str | None = None
 

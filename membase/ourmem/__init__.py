@@ -16,9 +16,12 @@ from .models import (
     ClaimVersion,
     EvidenceQuote,
     FactStatus,
+    FactUpdate,
+    FactUpdateAction,
     Justification,
     JustificationStatus,
 )
+from .reconciler import FactReconciler
 from .store import OurMemStore
 
 __all__ = [
@@ -32,7 +35,10 @@ __all__ = [
     "ClaimVersion",
     "EvidenceQuote",
     "FactExtractor",
+    "FactReconciler",
     "FactStatus",
+    "FactUpdate",
+    "FactUpdateAction",
     "Justification",
     "JustificationStatus",
     "MaintenanceReport",
