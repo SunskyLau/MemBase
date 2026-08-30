@@ -78,9 +78,9 @@ OurMem 希望把高层记忆从生成后静置的文本，变成具有成立依�
 
 当若干原子事实（atomic fact）能够形成具有复用价值的结论时，系统可以形成派生声明（derived claim），并记录它的成立依据（justification）。
 
-同一条派生声明（derived claim）可能有不止一种成立方式。例如，“Hotel A 适合父亲”既可能因为酒店离地铁近，也可能因为酒店提供可靠的无障碍接送。距离信息被纠正后，第一条依据可能失效，但第二条依据仍然存在，因此结论不应被机械删除。
+每条派生声明（derived claim）保存一张当前成立依据（justification）。这张依据可以同时引用多条共同必要的原子事实（atomic fact），并在依据发生变化时被新版本替换。
 
-显式成立依据（explicit justification）既用于解释结论，也用于告诉系统哪些事实变化后，相关派生声明（derived claim）需要重新判断。
+显式成立依据（explicit justification）既用于解释结论，也用于告诉系统哪些事实变化后，相关派生声明（derived claim）需要重新判断。当前依据中的任一必要事实失效后，系统就会重新验证这条结论。
 
 ### 3.3 根据变化维护相关结论
 
@@ -135,7 +135,7 @@ OurMem 希望把高层记忆从生成后静置的文本，变成具有成立依�
 
 - **LoCoMo**：观察多跳问题（multi-hop）、时间问题（temporal）和基础事实召回；
 - **LongMemEval-S**：观察知识更新（knowledge update）、跨会话推理（multi-session reasoning）、时间推理（temporal reasoning）和偏好使用；
-- **MEME**：观察删除（deletion）、级联（cascade）和缺失（absence）等更接近动态状态维护的问题。
+- **MEME**：观察删除（deletion）和级联（cascade）等更接近动态状态维护的问题。
 
 这些数据集能够说明系统是否具有实际价值，但不能单独证明派生声明（derived claim）的维护过程正确。
 
@@ -144,7 +144,6 @@ OurMem 希望把高层记忆从生成后静置的文本，变成具有成立依�
 我们还需要直接观察事实变化后，记忆内部发生了什么：
 
 - 相关派生声明（derived claim）是否被重新判断；
-- 仍有其他依据时，派生声明（derived claim）是否被错误删除；
 - 所有依据失效后，陈旧结论是否仍然残留；
 - 出现旧依据之外的新反例时，系统能否发现影响；
 - 与变化内容相似但没有真实依赖的记忆是否保持稳定；

@@ -5,13 +5,36 @@
 """
 
 from .extractor import FactExtractor
-from .models import AtomicFact, EvidenceQuote, FactStatus
+from .maintenance import ClaimMemory, MaintenanceReport
+from .models import (
+    AtomicFact,
+    ClaimClause,
+    ClaimKind,
+    ClaimPolarity,
+    ClaimStatus,
+    ClaimValue,
+    ClaimVersion,
+    EvidenceQuote,
+    FactStatus,
+    Justification,
+    JustificationStatus,
+)
 from .store import OurMemStore
 
 __all__ = [
     "AtomicFact",
+    "ClaimClause",
+    "ClaimKind",
+    "ClaimMemory",
+    "ClaimPolarity",
+    "ClaimStatus",
+    "ClaimValue",
+    "ClaimVersion",
     "EvidenceQuote",
     "FactExtractor",
     "FactStatus",
+    "Justification",
+    "JustificationStatus",
+    "MaintenanceReport",
     "OurMemStore",
 ]

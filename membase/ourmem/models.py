@@ -1,6 +1,6 @@
 """OurMem 最基础的记忆数据结构（data structure）。
 
-当前文件只描述两类对象：
+当前文件描述 OurMem 已经实现的基础对象：
 
 1. 证据原文（evidence quote）：从原始对话中摘录、直接支持某条事实的原文；
 2. 原子事实（atomic fact）：从对话中抽取、能够独立变化的最小事实单元。
@@ -11,8 +11,9 @@
 - 原子事实（atomic fact）是根据原文整理出的卡片；
 - 卡片内容被纠正时，不擦掉旧卡片，而是增加新卡片并保留版本关系。
 
-这里暂时不包含派生声明（derived claim）、成立依据（justification）、
-存储后端或语言模型（language model）调用。它们会随着实现逐步加入。
+派生主张（derived claim）不伪装成用户原话，而是通过成立依据
+（justification）递归指向原子事实（atomic fact）及其证据原文
+（evidence quote）。
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from __future__ import annotations
 from enum import Enum
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _new_id(prefix: str) -> str:
@@ -56,14 +57,10 @@ class FactStatus(str, Enum):
 class OurMemModel(BaseModel):
     """OurMem 数据模型（data model）的共同基础配置。
 
-    禁止未声明字段可以尽早发现拼写错误；赋值时重新校验则能避免对象在
-    后续维护中悄悄进入不合法状态。这只是当前选择，后续可根据使用体验调整。
+    禁止未声明字段，避免把拼错的字段静默写入持久化数据。
     """
 
-    model_config = ConfigDict(
-        extra="forbid",
-        validate_assignment=True,
-    )
+    model_config = ConfigDict(extra="forbid")
 
 
 class EvidenceQuote(OurMemModel):
@@ -179,3 +176,113 @@ class AtomicFact(OurMemModel):
         if any(not value.strip() for value in values):
             raise ValueError("列表中不能包含空字符串")
         return list(dict.fromkeys(values))
+
+
+class ClaimKind(str, Enum):
+    """首版派生主张（derived claim）的两种层次。"""
+
+    STATE = "state"
+    DECISION = "decision"
+
+
+class ClaimPolarity(str, Enum):
+    """主张值是肯定还是否定。"""
+
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+
+
+class ClaimStatus(str, Enum):
+    """派生主张（derived claim）当前是否仍被其唯一依据支持。"""
+
+    VALID = "valid"
+    INVALID = "invalid"
+
+
+class JustificationStatus(str, Enum):
+    """成立依据（justification）的生命周期状态。"""
+
+    ACTIVE = "active"
+    INVALID = "invalid"
+    SUPERSEDED = "superseded"
+
+
+class ClaimValue(OurMemModel):
+    """不包含时间范围的规范主张值。"""
+
+    proposition: str = Field(
+        min_length=1,
+        description="主张在当前身份下表达的规范值。",
+    )
+    polarity: ClaimPolarity = Field(
+        default=ClaimPolarity.POSITIVE,
+        description="主张值的肯定或否定极性。",
+    )
+
+
+class ClaimClause(OurMemModel):
+    """一条成立依据（justification）在有限时间内支持的结论。"""
+
+    value: ClaimValue
+    valid_from: int = Field(
+        description="有效区间起点，使用会话或事件的离散逻辑时间。",
+    )
+    valid_to: int = Field(
+        description="有效区间终点；区间采用左闭右开形式。",
+    )
+
+    @model_validator(mode="after")
+    def _validate_interval(self) -> ClaimClause:
+        if self.valid_to <= self.valid_from:
+            raise ValueError("valid_to must be greater than valid_from")
+        return self
+
+
+class ClaimVersion(OurMemModel):
+    """派生主张（derived claim）对外语义的一次不可变版本。"""
+
+    id: str = Field(
+        default_factory=lambda: _new_id("claim-version"),
+        min_length=1,
+    )
+    claim_key: str = Field(
+        min_length=1,
+        description="派生主张（derived claim）的稳定语义身份。",
+    )
+    kind: ClaimKind
+    clause: ClaimClause
+    status: ClaimStatus
+    supersedes_version_id: str | None = None
+
+
+class Justification(OurMemModel):
+    """一组直接支持如何共同推出一条派生主张（derived claim）。
+
+    ``support_version_ids`` 可以引用原子事实（atomic fact）版本，也可以引用
+    当前派生主张（derived claim）版本。派生来源最终沿这些引用展开到原始证据，
+    因此这里不重复保存伪造的原文片段。
+    """
+
+    id: str = Field(
+        default_factory=lambda: _new_id("justification"),
+        min_length=1,
+    )
+    conclusion_key: str = Field(min_length=1)
+    conclusion_kind: ClaimKind
+    support_version_ids: list[str] = Field(min_length=2, max_length=3)
+    explicit_defeater_version_ids: list[str] = Field(default_factory=list)
+    clause: ClaimClause
+    inducer_version: str = Field(default="manual-v0", min_length=1)
+    verifier_version: str = Field(default="manual-v0", min_length=1)
+    status: JustificationStatus = JustificationStatus.ACTIVE
+    supersedes_justification_id: str | None = None
+
+    @field_validator(
+        "support_version_ids",
+        "explicit_defeater_version_ids",
+    )
+    @classmethod
+    def _deduplicate_version_ids(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("Version references cannot contain duplicates")
+        return values
