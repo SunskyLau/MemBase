@@ -237,14 +237,21 @@ class MemoryWriter:
                 current = self.claim_memory.get_current_justification(
                     justification.conclusion_key
                 )
-                report = (
-                    self.claim_memory.add_justification(justification)
-                    if current is None
-                    else self.claim_memory.replace_justification(
-                        current.id,
-                        justification,
+                try:
+                    report = (
+                        self.claim_memory.add_justification(justification)
+                        if current is None
+                        else self.claim_memory.replace_justification(
+                            current.id,
+                            justification,
+                        )
                     )
-                )
+                except ValueError as error:
+                    print(
+                        "Rejected an induced justification that violates a "
+                        f"memory invariant: {error}"
+                    )
+                    continue
                 result.changed_claim_keys.extend(report.changed_claim_keys)
                 if justification.conclusion_key not in result.induced_claim_keys:
                     result.induced_claim_keys.append(justification.conclusion_key)

@@ -179,7 +179,11 @@ class JustificationInducer:
             == len(set(proposal.support_version_ids))
             and (
                 proposal.existing_claim_key is None
-                or proposal.existing_claim_key in existing_by_key
+                or (
+                    proposal.existing_claim_key in existing_by_key
+                    and existing_by_key[proposal.existing_claim_key].kind
+                    is proposal.claim_kind
+                )
             )
         ]
         if not valid_proposals:
