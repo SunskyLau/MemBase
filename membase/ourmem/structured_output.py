@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Callable, TypeVar
+
+from openai import APIError
 
 
 T = TypeVar("T")
@@ -14,19 +17,30 @@ def request_validated_json(
     messages: list[dict[str, str]],
     validator: Callable[[dict[str, Any]], T],
     context: str,
-    max_attempts: int = 3,
+    max_attempts: int = 5,
     max_tokens: int = 4096,
 ) -> T:
     """Request JSON and retry when parsing or schema validation fails."""
 
     conversation = list(messages)
     for attempt in range(1, max_attempts + 1):
-        response = interface(
-            [conversation],
-            temperature=0.0,
-            stream=False,
-            max_tokens=max_tokens,
-        )
+        try:
+            response = interface(
+                [conversation],
+                temperature=0.0,
+                stream=False,
+                max_tokens=max_tokens,
+            )
+        except APIError as error:
+            if attempt == max_attempts:
+                raise
+            delay = min(30, 2 ** attempt)
+            print(
+                f"API request failed for {context}; retrying in {delay}s "
+                f"({attempt}/{max_attempts - 1}): {error}"
+            )
+            time.sleep(delay)
+            continue
         content = response["content"]
         try:
             return validator(_parse_json_object(content))

@@ -32,7 +32,12 @@ class OpenAIEmbedder:
         batch_size: int = 128,
     ) -> None:
         self.model_name = model_name
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=8,
+            timeout=120.0,
+        )
         self.batch_size = batch_size
 
     def __call__(self, texts: list[str]) -> list[list[float]]:
