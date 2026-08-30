@@ -68,6 +68,23 @@ OurMem 希望把高层记忆从生成后静置的文本，变成具有成立依�
 
 宏观上，整个过程包含四个相互连接的部分。
 
+当前代码中的端到端流程是：
+
+```text
+FactExtractor
+→ MemoryCandidateRetriever
+→ FactReconciler
+→ MemoryWriter
+→ JustificationInducer
+→ ClaimMemory
+
+查询：MemoryReader
+持久化：OurMemPersistence
+评测适配：OurMemLayer
+```
+
+当前默认配置使用 `gpt-4.1-mini` 完成记忆构建（memory construction）、回答生成（answer generation）和模型评判（LLM judging），使用 `text-embedding-3-small` 完成语义嵌入（semantic embedding）。
+
 ### 3.1 保存可追溯的事实
 
 对话被整理为能够独立变化的原子事实（atomic fact）。每条原子事实（atomic fact）保留原始出处、时间、涉及对象和当前状态。
@@ -76,6 +93,8 @@ OurMem 希望把高层记忆从生成后静置的文本，变成具有成立依�
 
 新事实抽取后，事实协调器（fact reconciler）将它、对应的证据原文（evidence quote）以及调用方提供的当前候选事实进行一次结构化判断，输出新增、重复、替代或撤回，以及对应的旧事实标识。事实协调器（fact reconciler）只判断关系，不直接修改存储。
 
+当前实现使用同一个语义检索器（semantic retriever）完成三类候选搜索：旧事实匹配、派生所需支持，以及可能被新事实推翻的当前主张。嵌入向量只作为可重建缓存，不属于权威记忆状态。
+
 ### 3.2 形成带依据的高层结论
 
 当若干原子事实（atomic fact）能够形成具有复用价值的结论时，系统可以形成派生声明（derived claim），并记录它的成立依据（justification）。
@@ -83,6 +102,8 @@ OurMem 希望把高层记忆从生成后静置的文本，变成具有成立依�
 每条派生声明（derived claim）保存一条当前成立依据（justification）。这条依据可以同时引用多条共同必要的原子事实（atomic fact），并在依据发生变化时被新版本替换。
 
 显式成立依据（explicit justification）既用于解释结论，也用于告诉系统哪些事实变化后，相关派生声明（derived claim）需要重新判断。当前依据中的任一必要事实失效后，系统就会重新验证这条结论。
+
+依据归纳器（justification inducer）先批量提出候选，再单独检查完整支持是否充分、每条支持是否必要。只有两项都通过的候选才会写入。
 
 ### 3.3 根据变化维护相关结论
 
@@ -100,6 +121,8 @@ OurMem 希望把高层记忆从生成后静置的文本，变成具有成立依�
 查询时，系统可以同时检索派生声明（derived claim）和原子事实（atomic fact）。
 
 如果返回一条派生声明（derived claim），它还应能够展开当前有效的成立依据（justification），并继续回到原始对话。
+
+事实、成立依据（justification）、派生主张（derived claim）和当前版本指针统一保存为 JSON 快照；反向索引（reverse index）和嵌入缓存（embedding cache）在加载后重新构建。
 
 最终交给回答模型的内容不只是若干相似文本，而是：
 

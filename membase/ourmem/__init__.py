@@ -5,6 +5,7 @@
 """
 
 from .extractor import FactExtractor
+from .inducer import JustificationInducer
 from .maintenance import ClaimMemory, MaintenanceReport
 from .models import (
     AtomicFact,
@@ -21,8 +22,17 @@ from .models import (
     Justification,
     JustificationStatus,
 )
+from .persistence import OurMemPersistence
 from .reconciler import FactReconciler
+from .reader import MemoryReader
+from .retriever import (
+    MemoryCandidateRetriever,
+    OpenAIEmbedder,
+    SemanticCandidate,
+)
 from .store import OurMemStore
+from .system import OurMemSystem
+from .writer import FactWriteResult, MemoryWriter
 
 __all__ = [
     "AtomicFact",
@@ -40,7 +50,16 @@ __all__ = [
     "FactUpdate",
     "FactUpdateAction",
     "Justification",
+    "JustificationInducer",
     "JustificationStatus",
     "MaintenanceReport",
+    "MemoryCandidateRetriever",
+    "MemoryReader",
+    "MemoryWriter",
+    "FactWriteResult",
+    "OpenAIEmbedder",
+    "OurMemPersistence",
     "OurMemStore",
+    "OurMemSystem",
+    "SemanticCandidate",
 ]

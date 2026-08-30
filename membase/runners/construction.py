@@ -181,9 +181,15 @@ def memory_construction(
                                             "online evaluation. It falls back to normal memory construction.",
                                             UserWarning,
                                         )
-                                    layer.add_message(message)
+                                    layer.add_message(
+                                        message,
+                                        session_id=session.id,
+                                    )
                             else:
-                                layer.add_message(message)
+                                layer.add_message(
+                                    message,
+                                    session_id=session.id,
+                                )
                         except Exception as e:
                             if strict:
                                 pbar.close()
