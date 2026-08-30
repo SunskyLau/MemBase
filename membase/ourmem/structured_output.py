@@ -15,6 +15,7 @@ def request_validated_json(
     validator: Callable[[dict[str, Any]], T],
     context: str,
     max_attempts: int = 3,
+    max_tokens: int = 4096,
 ) -> T:
     """Request JSON and retry when parsing or schema validation fails."""
 
@@ -24,6 +25,7 @@ def request_validated_json(
             [conversation],
             temperature=0.0,
             stream=False,
+            max_tokens=max_tokens,
         )
         content = response["content"]
         try:

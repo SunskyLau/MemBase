@@ -112,6 +112,7 @@ class FactReconciler:
             ],
             validate_update,
             context="fact reconciliation",
+            max_tokens=256,
         )
 
     @staticmethod

@@ -305,4 +305,5 @@ class JustificationInducer:
             ],
             lambda output: output,
             context="justification induction",
+            max_tokens=2048,
         )
