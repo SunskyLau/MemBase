@@ -25,6 +25,7 @@ from openai import OpenAI
 from smartcomment import disable_tracing
 
 from membase.datasets.locomo import LoCoMo, _parse_evidence_ids
+from membase.evaluation.bleu import BLEU
 from membase.model_types.dataset import Message, QuestionAnswerPair
 from membase.model_types.memory import MemoryEntry
 from membase.ourmem.models import FactStatus
@@ -282,6 +283,9 @@ def run_preflight(
         model=api["embedding_model_name"],
         input=["agent memory"],
     )
+    bleu_witness = BLEU().compute(["memory answer"], [["memory answer"]])[0][
+        "value"
+    ]
     result = {
         "completed_at": utc_now(),
         "conversations": len(raw_dataset),
@@ -292,10 +296,15 @@ def run_preflight(
         "chat_witness": response.choices[0].message.content.strip(),
         "embedding_model": api["embedding_model_name"],
         "embedding_dimension": len(embedding.data[0].embedding),
+        "bleu_dependency_witness": bleu_witness,
     }
     if result["conversations"] != 10 or question_count != 1540:
         raise RuntimeError(f"Unexpected LoCoMo scope: {result}")
-    if result["chat_witness"] != "OK" or result["embedding_dimension"] != 1536:
+    if (
+        result["chat_witness"] != "OK"
+        or result["embedding_dimension"] != 1536
+        or bleu_witness != 1.0
+    ):
         raise RuntimeError(f"API witness failed: {result}")
     write_json(run_dir / "preflight.json", result)
     update_stage_time(run_dir, "preflight", started)
