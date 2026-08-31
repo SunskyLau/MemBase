@@ -539,16 +539,16 @@ def analyze(
     started = time.monotonic()
     evaluation_path = run_dir / f"evaluation_top{args.top_k}.json"
     items = read_json(evaluation_path)
-    expected = sum(
-        len(questions)
-        for _, questions in dataset[args.start_index : args.end_index]
-    )
+    _, question_lists = dataset[args.start_index : args.end_index]
+    expected = sum(len(questions) for questions in question_lists)
     if len(items) != expected:
         raise RuntimeError(f"Expected {expected} evaluation items, found {len(items)}")
 
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    user_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for item in items:
         groups[item["qa_pair"]["metadata"]["question_type"]].append(item)
+        user_groups[item["user_id"]].append(item)
 
     def summarize(group: list[dict[str, Any]]) -> dict[str, Any]:
         correct = sum(item["metrics"]["llm_judge"]["value"] for item in group)
@@ -567,18 +567,38 @@ def analyze(
         name: summarize(group)
         for name, group in sorted(groups.items())
     }
+    by_trajectory = {
+        name: summarize(group)
+        for name, group in sorted(
+            user_groups.items(),
+            key=lambda item: int(item[0].split("-")[-1]),
+        )
+    }
 
     evidence_items = [
         item for item in items if item["qa_pair"]["metadata"].get("evidence")
     ]
     evidence_hit = 0
     evidence_recall_sum = 0.0
+    evidence_bins: dict[str, list[dict[str, Any]]] = {
+        "zero": [],
+        "partial": [],
+        "full": [],
+    }
     for item in evidence_items:
         gold = set(item["qa_pair"]["metadata"]["evidence"])
         retrieved = retrieved_source_ids(item)
         overlap = gold & retrieved
         evidence_hit += bool(overlap)
         evidence_recall_sum += len(overlap) / len(gold)
+        bin_name = (
+            "zero"
+            if not overlap
+            else "full"
+            if len(overlap) == len(gold)
+            else "partial"
+        )
+        evidence_bins[bin_name].append(item)
 
     with_claim = [
         item
@@ -591,6 +611,43 @@ def analyze(
     claim_accuracy = (
         aggregate_metric(with_claim, "llm_judge") if with_claim else None
     )
+    without_claim = [item for item in items if item not in with_claim]
+    top_claim = [
+        item
+        for item in items
+        if item["retrieved_memories"]
+        and item["retrieved_memories"][0].get("metadata", {}).get("kind")
+        == "claim"
+    ]
+    without_top_claim = [item for item in items if item not in top_claim]
+
+    category_retrieval = {}
+    for category, category_items in sorted(groups.items()):
+        category_evidence = [
+            item
+            for item in category_items
+            if item["qa_pair"]["metadata"].get("evidence")
+        ]
+        recalls = []
+        hits = []
+        for item in category_evidence:
+            gold = set(item["qa_pair"]["metadata"]["evidence"])
+            overlap = gold & retrieved_source_ids(item)
+            hits.append(bool(overlap))
+            recalls.append(len(overlap) / len(gold))
+        category_retrieval[category] = {
+            "evidence_questions": len(category_evidence),
+            "evidence_hit_rate": sum(hits) / len(hits) if hits else None,
+            "mean_evidence_recall": sum(recalls) / len(recalls) if recalls else None,
+            "claim_retrieval_rate": sum(
+                any(
+                    memory.get("metadata", {}).get("kind") == "claim"
+                    for memory in item["retrieved_memories"]
+                )
+                for item in category_items
+            )
+            / len(category_items),
+        }
     snapshots = read_json(run_dir / "construction_summary.json")
     totals = Counter()
     for stats in snapshots.values():
@@ -630,6 +687,7 @@ def analyze(
         },
         "overall": overall,
         "by_category": by_category,
+        "by_trajectory": by_trajectory,
         "retrieval": {
             "questions_with_gold_evidence": len(evidence_items),
             "evidence_hit_rate": evidence_hit / len(evidence_items),
@@ -637,6 +695,25 @@ def analyze(
             "questions_retrieving_claim": len(with_claim),
             "claim_retrieval_rate": len(with_claim) / len(items),
             "accuracy_when_claim_retrieved": claim_accuracy,
+            "questions_without_claim": len(without_claim),
+            "accuracy_without_claim": aggregate_metric(
+                without_claim, "llm_judge"
+            ),
+            "questions_with_top_ranked_claim": len(top_claim),
+            "accuracy_with_top_ranked_claim": aggregate_metric(
+                top_claim, "llm_judge"
+            ),
+            "accuracy_without_top_ranked_claim": aggregate_metric(
+                without_top_claim, "llm_judge"
+            ),
+            "evidence_recall_bins": {
+                name: {
+                    "questions": len(group),
+                    "accuracy": aggregate_metric(group, "llm_judge"),
+                }
+                for name, group in evidence_bins.items()
+            },
+            "by_category": category_retrieval,
             "known_unresolved_gold_evidence_ids": [
                 "D",
                 "D10:19",
@@ -687,6 +764,21 @@ def write_report(path: Path, analysis: dict[str, Any]) -> None:
             f"{percent(result['accuracy'])} | {result['f1']:.4f} | "
             f"{result['bleu1']:.4f} |"
         )
+    lines.extend(
+        [
+            "",
+            "## 逐轨迹结果",
+            "",
+            "| 轨迹 | 正确/总数 | 准确率 | F1 | BLEU-1 |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for trajectory, result in analysis["by_trajectory"].items():
+        lines.append(
+            f"| {trajectory} | {result['correct']}/{result['questions']} | "
+            f"{percent(result['accuracy'])} | {result['f1']:.4f} | "
+            f"{result['bleu1']:.4f} |"
+        )
     retrieval = analysis["retrieval"]
     lines.extend(
         [
@@ -701,9 +793,31 @@ def write_report(path: Path, analysis: dict[str, Any]) -> None:
                 f"{percent(retrieval['accuracy_when_claim_retrieved'])}"
             ),
             (
+                "- 未检索到派生主张时的准确率："
+                f"{percent(retrieval['accuracy_without_claim'])}"
+            ),
+            (
+                "- 派生主张排在第一位时的准确率："
+                f"{percent(retrieval['accuracy_with_top_ranked_claim'])}"
+            ),
+            (
                 "- 原始数据中无法解析的证据编号："
                 + ", ".join(retrieval["known_unresolved_gold_evidence_ids"])
             ),
+            "",
+            "### 证据召回分层",
+            "",
+            "| 证据召回 | 问题数 | 准确率 |",
+            "|---|---:|---:|",
+        ]
+    )
+    for name, result in retrieval["evidence_recall_bins"].items():
+        lines.append(
+            f"| {name} | {result['questions']} | "
+            f"{percent(result['accuracy'])} |"
+        )
+    lines.extend(
+        [
             "",
             "## 记忆规模",
             "",
