@@ -196,4 +196,11 @@ class LoCoMo(MemBaseDataset):
 
     @classmethod
     def parse_judge_response(cls, content: str) -> float:
-        return float("correct" in content.lower())
+        labels = re.findall(
+            r'"label"\s*:\s*"(CORRECT|WRONG)"',
+            content,
+            flags=re.IGNORECASE,
+        )
+        if not labels:
+            raise ValueError("LoCoMo judge response does not contain a valid label")
+        return float(labels[-1].upper() == "CORRECT")
