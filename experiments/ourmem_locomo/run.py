@@ -22,6 +22,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from openai import OpenAI
+from smartcomment import disable_tracing
 
 from membase.datasets.locomo import LoCoMo, _parse_evidence_ids
 from membase.model_types.dataset import Message, QuestionAnswerPair
@@ -382,8 +383,9 @@ def run_search(
     started = time.monotonic()
     shards_dir = run_dir / "retrieval_shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
-    selected = list(zip(*dataset[args.start_index : args.end_index]))
-    trajectories, question_lists = selected
+    trajectories, question_lists = dataset[
+        args.start_index : args.end_index
+    ]
 
     pending = []
     for trajectory, questions in zip(trajectories, question_lists):
@@ -445,13 +447,15 @@ def run_evaluation(
     run_dir: Path,
 ) -> Path:
     started = time.monotonic()
+    disable_tracing()
     retrieval_shards = run_dir / "retrieval_shards"
     evaluation_shards = run_dir / "evaluation_shards"
     evaluation_shards.mkdir(parents=True, exist_ok=True)
     api_keys = [api["api_key"]] * args.evaluation_concurrency
     base_urls = [api["base_url"]] * args.evaluation_concurrency
-    selected = list(zip(*dataset[args.start_index : args.end_index]))
-    trajectories, question_lists = selected
+    trajectories, question_lists = dataset[
+        args.start_index : args.end_index
+    ]
 
     for trajectory, questions in zip(trajectories, question_lists):
         output_path = evaluation_shards / f"{trajectory.id}.json"
