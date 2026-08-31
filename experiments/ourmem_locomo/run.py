@@ -212,6 +212,7 @@ def write_manifest(
         "protocol": {
             "shared_memory_per_conversation": True,
             "include_blip_caption": True,
+            "include_image_query": True,
             "top_k": args.top_k,
             "message_batch_size": args.message_batch_size,
             "construction_workers": args.workers,
@@ -222,8 +223,16 @@ def write_manifest(
         },
         "api_base_url": api["base_url"],
         "run_dir": str(run_dir),
+        "stage": args.stage,
     }
-    write_json(run_dir / "manifest.json", manifest)
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.exists():
+        write_json(manifest_path, manifest)
+    stage_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+    write_json(
+        run_dir / "stage_manifests" / f"{stage_name}_{args.stage}.json",
+        manifest,
+    )
 
 
 def update_stage_time(run_dir: Path, stage: str, started: float) -> None:
@@ -503,6 +512,65 @@ def run_evaluation(
     return output_path
 
 
+def rescore_evaluation(
+    args: argparse.Namespace,
+    dataset: LoCoMo,
+    run_dir: Path,
+) -> Path:
+    """Deterministically rescore stored judge responses from their final JSON label."""
+
+    started = time.monotonic()
+    source_dir = run_dir / "evaluation_shards"
+    output_dir = run_dir / "evaluation_shards_rescored"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trajectories, question_lists = dataset[
+        args.start_index : args.end_index
+    ]
+    corrections = []
+    merged = []
+
+    for trajectory, questions in zip(trajectories, question_lists):
+        source_path = source_dir / f"{trajectory.id}.json"
+        items = read_json(source_path)
+        if len(items) != len(questions):
+            raise RuntimeError(f"Unexpected evaluation shard size: {source_path}")
+        for item in items:
+            metric = item["metrics"]["llm_judge"]
+            original_value = metric["value"]
+            corrected_value = LoCoMo.parse_judge_response(
+                metric["metadata"]["judge_response"]
+            )
+            metric["metadata"]["stored_value_before_rescore"] = original_value
+            metric["metadata"]["score_source"] = "final_json_label"
+            metric["value"] = corrected_value
+            if corrected_value != original_value:
+                corrections.append(
+                    {
+                        "qa_id": item["qa_pair"]["id"],
+                        "original_value": original_value,
+                        "corrected_value": corrected_value,
+                    }
+                )
+        write_json(output_dir / f"{trajectory.id}.json", items)
+        merged.extend(items)
+
+    output_path = run_dir / f"evaluation_top{args.top_k}_rescored.json"
+    write_json(output_path, merged)
+    write_json(
+        run_dir / "judge_rescore_summary.json",
+        {
+            "completed_at": utc_now(),
+            "source": str(run_dir / f"evaluation_top{args.top_k}.json"),
+            "output": str(output_path),
+            "method": "strict final JSON label",
+            "items": len(merged),
+            "corrections": corrections,
+        },
+    )
+    update_stage_time(run_dir, "rescore", started)
+    return output_path
+
+
 def wilson_interval(correct: int, total: int) -> tuple[float, float]:
     if total == 0:
         return 0.0, 0.0
@@ -537,7 +605,12 @@ def analyze(
     run_dir: Path,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    evaluation_path = run_dir / f"evaluation_top{args.top_k}.json"
+    rescored_path = run_dir / f"evaluation_top{args.top_k}_rescored.json"
+    evaluation_path = (
+        rescored_path
+        if rescored_path.exists()
+        else run_dir / f"evaluation_top{args.top_k}.json"
+    )
     items = read_json(evaluation_path)
     _, question_lists = dataset[args.start_index : args.end_index]
     expected = sum(len(questions) for questions in question_lists)
@@ -684,6 +757,8 @@ def analyze(
             "categories": [1, 2, 3, 4],
             "start_index": args.start_index,
             "end_index": args.end_index,
+            "evaluation_artifact": str(evaluation_path),
+            "image_inputs": ["blip_caption", "query"],
         },
         "overall": overall,
         "by_category": by_category,
@@ -721,6 +796,17 @@ def analyze(
             ],
         },
         "memory": dict(totals),
+        "judge_rescore": (
+            read_json(run_dir / "judge_rescore_summary.json")
+            if (run_dir / "judge_rescore_summary.json").exists()
+            else None
+        ),
+        "limitations": {
+            "image_query_is_privileged_metadata": True,
+            "token_and_currency_cost_unavailable": True,
+            "stage_times_cover_last_successful_invocation_only": True,
+            "single_run_no_server_seed": True,
+        },
         "failure_examples": failures,
     }
     update_stage_time(run_dir, "analysis", started)
@@ -738,6 +824,9 @@ def write_report(path: Path, analysis: dict[str, Any]) -> None:
     overall = analysis["overall"]
     lines = [
         "# OurMem 在 LoCoMo 上的实验结果",
+        "",
+        "> 实际输入协议包含 LoCoMo 发布的 `blip_caption` 和图像检索 `query`。",
+        "> 模型评判分数由保存响应中的最终 JSON 标签确定性重评分。",
         "",
         "## 核心结果",
         "",
@@ -834,6 +923,8 @@ def write_report(path: Path, analysis: dict[str, Any]) -> None:
             "它不能单独证明成立依据机制优于其他记忆系统；该结论仍需相同协议下的"
             "基线和消融实验支持。派生主张检索率与准确率之间的关系也只是相关性，"
             "不能解释为因果增益。",
+            "本次没有同协议基线、多次重复运行或可信 token/货币成本记录；"
+            "阶段耗时只代表最后一次成功调用，不能视为累计端到端成本。",
             "",
         ]
     )
@@ -844,7 +935,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--stage",
-        choices=["all", "preflight", "construction", "search", "evaluation", "analysis"],
+        choices=[
+            "all",
+            "preflight",
+            "construction",
+            "search",
+            "evaluation",
+            "rescore",
+            "analysis",
+        ],
         default="all",
     )
     parser.add_argument("--run-name", default="full_v1")
@@ -892,6 +991,8 @@ def main() -> None:
         run_search(args, config, dataset, run_dir)
     if args.stage in {"all", "evaluation"}:
         run_evaluation(args, api, dataset, run_dir)
+    if args.stage in {"all", "rescore"}:
+        rescore_evaluation(args, dataset, run_dir)
     if args.stage in {"all", "analysis"}:
         result = analyze(args, dataset, run_dir)
         print(json.dumps(result, ensure_ascii=False, indent=2))
