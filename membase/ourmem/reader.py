@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ..model_types.memory import MemoryEntry
 from .maintenance import ClaimMemory
-from .models import AtomicFact, ClaimStatus, EvidenceQuote
+from .models import AtomicFact, ClaimStatus
 from .retriever import MemoryCandidateRetriever
 from .store import OurMemStore
 
@@ -42,21 +42,18 @@ class MemoryReader:
         for match in matches:
             if match.kind == "fact":
                 fact = fact_by_id[match.id]
-                quote = self.fact_store.get_evidence_quote(
-                    fact.evidence_quote_id
-                )
                 entries.append(
                     MemoryEntry(
                         content=fact.content,
-                        formatted_content=self._format_fact(fact, quote),
+                        formatted_content=self._format_fact(fact),
                         metadata={
                             "id": fact.id,
                             "kind": "fact",
                             "score": match.score,
                             "mention_time": fact.mention_time,
                             "event_time": fact.event_time,
-                            "evidence_quote_ids": [quote.id],
-                            "source_message_ids": [quote.message_id],
+                            "source_quotes": [fact.source.quote],
+                            "source_message_ids": [fact.source.message_id],
                         },
                     )
                 )
@@ -67,18 +64,15 @@ class MemoryReader:
                 claim.claim_key
             )
             support_lines = []
-            evidence_quote_ids = []
+            source_quotes = []
             source_message_ids = []
             for fact_id in supporting_fact_ids:
                 fact = self.fact_store.get_fact(fact_id)
-                quote = self.fact_store.get_evidence_quote(
-                    fact.evidence_quote_id
-                )
                 support_lines.append(
-                    "- " + self._format_fact(fact, quote).replace("\n", "\n  ")
+                    "- " + self._format_fact(fact).replace("\n", "\n  ")
                 )
-                evidence_quote_ids.append(quote.id)
-                source_message_ids.append(quote.message_id)
+                source_quotes.append(fact.source.quote)
+                source_message_ids.append(fact.source.message_id)
             entries.append(
                 MemoryEntry(
                     content=claim.clause.value.proposition,
@@ -95,7 +89,7 @@ class MemoryReader:
                         "polarity": claim.clause.value.polarity.value,
                         "score": match.score,
                         "supporting_fact_ids": supporting_fact_ids,
-                        "evidence_quote_ids": evidence_quote_ids,
+                        "source_quotes": source_quotes,
                         "source_message_ids": list(
                             dict.fromkeys(source_message_ids)
                         ),
@@ -105,12 +99,12 @@ class MemoryReader:
         return entries
 
     @staticmethod
-    def _format_fact(fact: AtomicFact, quote: EvidenceQuote) -> str:
+    def _format_fact(fact: AtomicFact) -> str:
         lines = [
             f"Fact: {fact.content}",
             f"Mention time: {fact.mention_time}",
         ]
         if fact.event_time is not None:
             lines.append(f"Event time: {fact.event_time}")
-        lines.append(f"Source: {quote.quote}")
+        lines.append(f"Source: {fact.source.quote}")
         return "\n".join(lines)

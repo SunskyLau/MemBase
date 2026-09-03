@@ -9,7 +9,7 @@ from ..model_types.memory import MemoryEntry
 from .extractor import FactExtractor
 from .inducer import JustificationInducer
 from .maintenance import ClaimMemory
-from .models import AtomicFact, EvidenceQuote
+from .models import AtomicFact
 from .persistence import OurMemPersistence
 from .reader import MemoryReader
 from .reconciler import FactReconciler
@@ -94,19 +94,15 @@ class OurMemSystem:
             session_id=session_id,
             message_offset=message_offset,
         )
-        return [
-            self.writer.write(evidence_quote, fact)
-            for evidence_quote, fact in extracted
-        ]
+        return [self.writer.write(fact) for fact in extracted]
 
     def write_fact(
         self,
-        evidence_quote: EvidenceQuote,
         fact: AtomicFact,
     ) -> FactWriteResult:
         """写入已经抽取好的原子事实（atomic fact）。"""
 
-        return self.writer.write(evidence_quote, fact)
+        return self.writer.write(fact)
 
     def retrieve(self, query: str, k: int = 10) -> list[MemoryEntry]:
         """联合检索事实和派生主张（derived claim）。"""

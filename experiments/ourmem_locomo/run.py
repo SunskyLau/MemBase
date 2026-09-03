@@ -333,7 +333,13 @@ def snapshot_statistics(path: Path) -> dict[str, int]:
     fact_status = Counter(fact["status"] for fact in facts)
     claim_status = Counter(claim["status"] for claim in current_claims)
     return {
-        "evidence_quotes": len(snapshot["fact_store"]["evidence_quotes"]),
+        "source_evidence": len(facts),
+        # 第二项兼容重构前生成的实验快照。
+        "retraction_evidence": sum(
+            fact.get("retraction_source") is not None
+            or fact.get("retracted_by_evidence_quote_id") is not None
+            for fact in facts
+        ),
         "facts_total": len(facts),
         "facts_active": fact_status[FactStatus.ACTIVE.value],
         "facts_superseded": fact_status[FactStatus.SUPERSEDED.value],

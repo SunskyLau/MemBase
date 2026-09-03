@@ -1,13 +1,7 @@
 """OurMem 的确定性事实存储（deterministic fact store）。
 
-这个存储可以想象成两个抽屉：
-
-- 一个抽屉保存证据原文（evidence quote）；
-- 一个抽屉保存原子事实（atomic fact）。
-
-它只负责维护对象之间的引用和事实生命周期，不负责从自然语言中抽取事实，
-也不负责判断两条事实在语义上是否构成替代。上层逻辑确定关系后，再调用这里
-的方法执行确定性的状态变化。
+每条原子事实（atomic fact）已经内嵌其来源证据（source evidence），因此存储只需
+维护事实及其生命周期。自然语言抽取和事实关系判断由上层组件完成。
 """
 
 from __future__ import annotations
@@ -15,30 +9,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .models import AtomicFact, EvidenceQuote, FactStatus
+from .models import AtomicFact, FactStatus, SourceEvidence
 
 
 class OurMemStore:
-    """在内存中保存证据原文（evidence quote）和原子事实（atomic fact）。"""
+    """在内存中保存当前与历史原子事实（atomic fact）。"""
 
     def __init__(self) -> None:
-        self._evidence_quotes: dict[str, EvidenceQuote] = {}
         self._facts: dict[str, AtomicFact] = {}
-
-    def add_evidence_quote(self, evidence_quote: EvidenceQuote) -> None:
-        """添加一条证据原文（evidence quote）。"""
-
-        self._evidence_quotes[evidence_quote.id] = evidence_quote
-
-    def get_evidence_quote(self, evidence_quote_id: str) -> EvidenceQuote:
-        """根据标识读取证据原文（evidence quote）。"""
-
-        return self._evidence_quotes[evidence_quote_id]
-
-    def get_evidence_quotes(self) -> list[EvidenceQuote]:
-        """按照写入顺序返回全部证据原文（evidence quote）。"""
-
-        return list(self._evidence_quotes.values())
 
     def add_fact(self, fact: AtomicFact) -> None:
         """添加一条普通的新原子事实（atomic fact）。
@@ -47,7 +25,6 @@ class OurMemStore:
         :meth:`supersede_fact`，让旧状态和版本指针在同一个操作中完成更新。
         """
 
-        self.get_evidence_quote(fact.evidence_quote_id)
         self._facts[fact.id] = fact
 
     def get_fact(self, fact_id: str) -> AtomicFact:
@@ -83,10 +60,6 @@ class OurMemStore:
         """返回可以直接写入 JSON 的事实存储状态。"""
 
         return {
-            "evidence_quotes": [
-                evidence_quote.model_dump(mode="json")
-                for evidence_quote in self._evidence_quotes.values()
-            ],
             "facts": [
                 fact.model_dump(mode="json")
                 for fact in self._facts.values()
@@ -97,8 +70,8 @@ class OurMemStore:
     def load(cls, path: str | Path) -> OurMemStore:
         """从 JSON 快照（JSON snapshot）恢复事实存储（fact store）。
 
-        加载时重新经过 Pydantic 数据模型（data model）解析，恢复证据原文
-        （evidence quote）、原子事实（atomic fact）及其历史状态。
+        加载时重新经过 Pydantic 数据模型（data model）解析，恢复原子事实
+        （atomic fact）、内嵌来源与历史状态。
         """
 
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -106,16 +79,34 @@ class OurMemStore:
 
     @classmethod
     def from_dict(cls, data: dict) -> OurMemStore:
-        """从 JSON 对象恢复事实存储状态。"""
+        """从当前或旧版 JSON 对象恢复事实存储状态。"""
 
         store = cls()
-
-        for raw_evidence_quote in data["evidence_quotes"]:
-            evidence_quote = EvidenceQuote.model_validate(raw_evidence_quote)
-            store._evidence_quotes[evidence_quote.id] = evidence_quote
+        # full_v1 等既有快照将来源单独存放；加载时一次性内嵌到对应事实。
+        legacy_sources = {
+            raw_source["id"]: {
+                key: value
+                for key, value in raw_source.items()
+                if key != "id"
+            }
+            for raw_source in data.get("evidence_quotes", [])
+        }
 
         for raw_fact in data["facts"]:
-            fact = AtomicFact.model_validate(raw_fact)
+            fact_data = dict(raw_fact)
+            if "evidence_quote_id" in fact_data:
+                source_id = fact_data.pop("evidence_quote_id")
+                retraction_source_id = fact_data.pop(
+                    "retracted_by_evidence_quote_id",
+                    None,
+                )
+                fact_data["source"] = legacy_sources[source_id]
+                fact_data["retraction_source"] = (
+                    legacy_sources[retraction_source_id]
+                    if retraction_source_id is not None
+                    else None
+                )
+            fact = AtomicFact.model_validate(fact_data)
             store._facts[fact.id] = fact
 
         return store
@@ -138,8 +129,6 @@ class OurMemStore:
                 f"is '{old_fact.status.value}'."
             )
 
-        self.get_evidence_quote(new_fact.evidence_quote_id)
-
         new_fact.supersedes_fact_id = old_fact.id
         new_fact.status = FactStatus.ACTIVE
         old_fact.status = FactStatus.SUPERSEDED
@@ -148,7 +137,7 @@ class OurMemStore:
     def retract_fact(
         self,
         fact_id: str,
-        evidence_quote_id: str | None = None,
+        retraction_source: SourceEvidence | None = None,
     ) -> None:
         """撤回一条当前有效的原子事实（atomic fact），但保留历史记录。"""
 
@@ -158,7 +147,5 @@ class OurMemStore:
                 f"Only an active fact can be retracted, but '{fact_id}' "
                 f"is '{fact.status.value}'."
             )
-        if evidence_quote_id is not None:
-            self.get_evidence_quote(evidence_quote_id)
         fact.status = FactStatus.RETRACTED
-        fact.retracted_by_evidence_quote_id = evidence_quote_id
+        fact.retraction_source = retraction_source

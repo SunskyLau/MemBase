@@ -2,18 +2,18 @@
 
 当前文件描述 OurMem 已经实现的基础对象：
 
-1. 证据原文（evidence quote）：从原始对话中摘录、直接支持某条事实的原文；
+1. 来源证据（source evidence）：从原始对话中摘录、直接支持某条事实的原文；
 2. 原子事实（atomic fact）：从对话中抽取、能够独立变化的最小事实单元。
 
 可以把它们想象成读书时的“荧光笔标记”和“事实卡片”：
 
-- 证据原文（evidence quote）是书页上被标亮的原文；
+- 来源证据（source evidence）是事实卡片背面保留的原文与出处；
 - 原子事实（atomic fact）是根据原文整理出的卡片；
 - 卡片内容被纠正时，不擦掉旧卡片，而是增加新卡片并保留版本关系。
 
 派生主张（derived claim）不伪装成用户原话，而是通过成立依据
-（justification）递归指向原子事实（atomic fact）及其证据原文
-（evidence quote）。
+（justification）递归指向原子事实（atomic fact）及其来源证据
+（source evidence）。
 """
 
 from __future__ import annotations
@@ -63,13 +63,13 @@ class OurMemModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class EvidenceQuote(OurMemModel):
-    """从原始消息中摘录的直接证据。
+class SourceEvidence(OurMemModel):
+    """内嵌在原子事实（atomic fact）中的直接来源。
 
-    证据原文（evidence quote）不是系统总结，也不是系统推断。它表示：
+    来源证据（source evidence）不是系统总结，也不是系统推断。它表示：
     “原始对话中的这一段文字，是某条原子事实（atomic fact）的直接来源。”
 
-    一条消息可以产生多条证据原文（evidence quote），例如：
+    一条消息可以产生多条来源证据（source evidence），例如：
 
     ``父亲不能走太远，母亲不吃辣。``
 
@@ -77,11 +77,6 @@ class EvidenceQuote(OurMemModel):
     独立更新的原子事实（atomic fact）。
     """
 
-    id: str = Field(
-        default_factory=lambda: _new_id("quote"),
-        min_length=1,
-        description="证据原文（evidence quote）的唯一标识。",
-    )
     message_id: str = Field(
         min_length=1,
         description="该片段来自哪一条 MemBase 消息。",
@@ -89,8 +84,7 @@ class EvidenceQuote(OurMemModel):
     session_id: str | None = Field(
         default=None,
         description=(
-            "该消息所在的会话标识。MemBase 当前没有直接把它传给记忆层（memory layer），"
-            "因此先允许为空。"
+            "该消息所在的会话标识。调用方暂时无法提供时可以为空。"
         ),
     )
     message_index: int | None = Field(
@@ -107,7 +101,7 @@ class EvidenceQuote(OurMemModel):
     )
     quote: str = Field(
         min_length=1,
-        description="真正支持事实的原始文本，而不是整段对话摘要。",
+        description="真正支持事实的原始文本片段，而不是系统生成的摘要。",
     )
     timestamp: str = Field(
         min_length=1,
@@ -137,17 +131,20 @@ class AtomicFact(OurMemModel):
         min_length=1,
         description="事实本身的自然语言表达，一条记录尽量只表达一个可独立变化的事实。",
     )
+    # 是否保留，待定
     entities: list[str] = Field(
         default_factory=list,
         description="事实涉及的人物、地点、物品或其他实体，用于后续定位相关记忆。",
     )
-    evidence_quote_id: str = Field(
-        min_length=1,
-        description="直接支持这条事实的证据原文（evidence quote）标识。",
+    source: SourceEvidence = Field(
+        description="直接支持这条事实的原始文本与出处。",
     )
     mention_time: str = Field(
         min_length=1,
-        description="事实在对话中被提及的时间，通常来自 MemBase 消息时间戳。",
+        description=(
+            "事实在对话中被提及的时间，通常等于来源证据的时间戳，并作为事实的"
+            "直接时间字段保留。"
+        ),
     )
     event_time: str | None = Field(
         default=None,
@@ -167,9 +164,9 @@ class AtomicFact(OurMemModel):
             "（atomic fact）。普通新增事实保持为空。"
         ),
     )
-    retracted_by_evidence_quote_id: str | None = Field(
+    retraction_source: SourceEvidence | None = Field(
         default=None,
-        description="明确撤回这条事实的证据原文（evidence quote）标识。",
+        description="明确撤回这条事实的后续原文与出处。",
     )
 
     @field_validator("entities")

@@ -11,7 +11,6 @@ from .models import (
     ClaimKind,
     ClaimStatus,
     ClaimVersion,
-    EvidenceQuote,
     FactUpdate,
     FactUpdateAction,
     Justification,
@@ -61,7 +60,6 @@ class MemoryWriter:
 
     def write(
         self,
-        evidence_quote: EvidenceQuote,
         new_fact: AtomicFact,
     ) -> FactWriteResult:
         """协调、执行并派生一条新原子事实（atomic fact）。"""
@@ -80,20 +78,17 @@ class MemoryWriter:
         ]
         update = self.reconciler.reconcile(
             new_fact,
-            evidence_quote,
             candidates,
         )
 
         if update.action is FactUpdateAction.DUPLICATE:
             return FactWriteResult(update=update)
 
-        self.fact_store.add_evidence_quote(evidence_quote)
         result = FactWriteResult(update=update)
         if update.action is FactUpdateAction.ADD:
             self.fact_store.add_fact(new_fact)
             self._apply_new_defeaters(
                 new_fact,
-                evidence_quote,
                 result,
                 include_invalid_claims=False,
                 hard_changed_version_id=None,
@@ -102,7 +97,6 @@ class MemoryWriter:
             self.fact_store.supersede_fact(update.target_fact_id, new_fact)
             self._apply_new_defeaters(
                 new_fact,
-                evidence_quote,
                 result,
                 include_invalid_claims=True,
                 hard_changed_version_id=update.target_fact_id,
@@ -112,7 +106,7 @@ class MemoryWriter:
         elif update.action is FactUpdateAction.RETRACT:
             report = self.claim_memory.retract_fact(
                 update.target_fact_id,
-                evidence_quote.id,
+                new_fact.source,
             )
             result.changed_claim_keys.extend(report.changed_claim_keys)
 
@@ -124,7 +118,6 @@ class MemoryWriter:
     def _apply_new_defeaters(
         self,
         new_fact: AtomicFact,
-        evidence_quote: EvidenceQuote,
         result: FactWriteResult,
         include_invalid_claims: bool,
         hard_changed_version_id: str | None,
@@ -185,7 +178,6 @@ class MemoryWriter:
         ]
         defeated_keys = self.inducer.detect_defeated_claim_keys(
             new_fact,
-            evidence_quote,
             candidates,
             {
                 claim.claim_key: support_facts_by_claim[claim.claim_key]

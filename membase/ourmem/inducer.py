@@ -16,7 +16,6 @@ from .models import (
     ClaimPolarity,
     ClaimValue,
     ClaimVersion,
-    EvidenceQuote,
     Justification,
 )
 from .retriever import SemanticCandidate
@@ -255,7 +254,6 @@ class JustificationInducer:
     def detect_defeated_claim_keys(
         self,
         new_fact: AtomicFact,
-        new_evidence_quote: EvidenceQuote,
         candidate_claims: list[ClaimVersion],
         supporting_facts_by_claim: dict[str, list[AtomicFact]],
     ) -> list[str]:
@@ -266,7 +264,7 @@ class JustificationInducer:
         request = {
             "new_fact": {
                 "content": new_fact.content,
-                "source_quote": new_evidence_quote.quote,
+                "source_quote": new_fact.source.quote,
                 "mention_time": new_fact.mention_time,
                 "event_time": new_fact.event_time,
             },

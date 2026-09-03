@@ -1,4 +1,4 @@
-"""从 MemBase 消息（message）中抽取证据原文和原子事实。"""
+"""从 MemBase 消息（message）中抽取带来源的原子事实。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from ..inference_utils.backends import get_interface_for_inference
 from ..model_types.dataset import Message
-from .models import AtomicFact, EvidenceQuote
+from .models import AtomicFact, SourceEvidence
 from .structured_output import request_validated_json
 
 
@@ -67,7 +67,7 @@ class FactExtractionOutput(BaseModel):
 
 
 class FactExtractor:
-    """将消息（message）转换为证据原文（evidence quote）和原子事实（atomic fact）。"""
+    """将消息（message）转换为内嵌来源的原子事实（atomic fact）。"""
 
     def __init__(
         self,
@@ -88,11 +88,11 @@ class FactExtractor:
         messages: list[Message],
         session_id: str | None = None,
         message_offset: int = 0,
-    ) -> list[tuple[EvidenceQuote, AtomicFact]]:
+    ) -> list[AtomicFact]:
         """从一组有序消息（message）中抽取事实。
 
         ``messages`` 可以包含一条消息（message），也可以包含一个完整会话
-        （session）。每条结果仍然通过 ``message_id`` 指向唯一的原始消息。
+        （session）。每条结果仍然通过 ``source.message_id`` 指向唯一的原始消息。
         ``message_offset`` 表示第一条输入消息在会话（session）中的位置；处理完整
         会话（session）时保持为 0，处理后续消息片段时传入对应起点。
         """
@@ -151,7 +151,7 @@ class FactExtractor:
         results = []
         for extracted_fact in extracted_facts:
             message = messages_by_id[extracted_fact.message_id]
-            evidence_quote = EvidenceQuote(
+            source = SourceEvidence(
                 message_id=message.id,
                 session_id=session_id,
                 message_index=message_indices[message.id],
@@ -162,10 +162,10 @@ class FactExtractor:
             fact = AtomicFact(
                 content=extracted_fact.content,
                 entities=extracted_fact.entities,
-                evidence_quote_id=evidence_quote.id,
-                mention_time=evidence_quote.timestamp,
+                source=source,
+                mention_time=source.timestamp,
                 event_time=extracted_fact.event_time,
             )
-            results.append((evidence_quote, fact))
+            results.append(fact)
 
         return results

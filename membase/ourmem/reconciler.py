@@ -6,7 +6,7 @@ import json
 from typing import Any, Callable
 
 from ..inference_utils.backends import get_interface_for_inference
-from .models import AtomicFact, EvidenceQuote, FactUpdate, FactUpdateAction
+from .models import AtomicFact, FactUpdate, FactUpdateAction
 from .structured_output import request_validated_json
 
 
@@ -64,13 +64,12 @@ class FactReconciler:
     def reconcile(
         self,
         new_fact: AtomicFact,
-        new_evidence_quote: EvidenceQuote,
         candidate_facts: list[AtomicFact],
     ) -> FactUpdate:
         """判断新事实相对候选当前事实应执行的操作。
 
         候选检索由调用方负责。这里假设 ``candidate_facts`` 只包含当前有效事实，
-        并用 ``new_evidence_quote`` 保留纠正、撤回等原始话语信号。该方法只完成
+        并用 ``new_fact.source`` 中的原文保留纠正、撤回等话语信号。该方法只完成
         一次关系判断，不直接修改事实存储。
         """
 
@@ -80,7 +79,7 @@ class FactReconciler:
         request = {
             "new_fact": {
                 **self._serialize_fact(new_fact),
-                "source_quote": new_evidence_quote.quote,
+                "source_quote": new_fact.source.quote,
             },
             "candidate_facts": [
                 self._serialize_fact(fact) for fact in candidate_facts

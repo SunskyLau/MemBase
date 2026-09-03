@@ -21,6 +21,7 @@ from .models import (
     ClaimVersion,
     FactStatus,
     Justification,
+    SourceEvidence,
 )
 from .store import OurMemStore
 
@@ -110,11 +111,11 @@ class ClaimMemory:
     def retract_fact(
         self,
         fact_id: str,
-        evidence_quote_id: str | None = None,
+        retraction_source: SourceEvidence | None = None,
     ) -> MaintenanceReport:
         """撤回一条原子事实（atomic fact），并立即维护下游主张。"""
 
-        self.fact_store.retract_fact(fact_id, evidence_quote_id)
+        self.fact_store.retract_fact(fact_id, retraction_source)
         return self.on_version_changed(fact_id)
 
     def on_version_changed(self, version_id: str) -> MaintenanceReport:
