@@ -1,0 +1,10 @@
+# 每个实验的本地产物
+/*/runs/
+
+# 本地入口可以直接填写密钥；无密钥版本保存在 run.example.sh。
+/memoryagentbench_long_context/run.sh
+/memoryagentbench_bm25/run.sh
+/meme_in_context/run.sh
+/meme_bm25/run.sh
+/meme_dense/run.sh
+/meme_md_flat/run.sh
