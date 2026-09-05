@@ -1,7 +1,19 @@
+from __future__ import annotations
+
 from collections import OrderedDict
 from ..utils._lazy_mapping import _LazyMapping
-from .base import BaseMetric
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .base import BaseMetric
+
+
+def __getattr__(name):
+    if name == "BaseMetric":
+        from .base import BaseMetric
+        globals()[name] = BaseMetric
+        return BaseMetric
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 _MAPPING_NAMES: OrderedDict[str, str] = OrderedDict(
