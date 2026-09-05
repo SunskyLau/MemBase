@@ -4,6 +4,9 @@
 # Local benchmark datasets
 /data/
 
+# 固定版本的官方代码副本由数据准备入口获取。
+/external/
+
 ### Linux ###
 *~
 
