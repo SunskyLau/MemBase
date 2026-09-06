@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PROGRESS_INTERVAL=10                     # 进度刷新间隔（秒），不影响实验配置
+
 # 在这里填写普通配置和密钥，然后直接运行 ./run.sh。
 MODE="core"
 CONDA_ENV="membase-ourmem"
@@ -41,7 +43,7 @@ fi
 [[ "$LOCOMO_JUDGE" != "1" ]] || extra_args+=(--locomo-judge)
 export OPENAI_API_KEY
 
-exec "${python_command[@]}" "${repo_root}/scripts/run_benchmark.py" \
+exec "${python_command[@]}" "${repo_root}/scripts/run_with_progress.py" --progress-interval "$PROGRESS_INTERVAL" \
   --benchmark memoryagentbench --baseline ourmem --mode "$MODE" \
   --output-dir "${script_dir}/runs" --run-id "$RUN_ID" \
   --base-url "$OPENAI_BASE_URL" --internal-model "$MEMORY_MODEL" \

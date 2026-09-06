@@ -8,7 +8,7 @@ sys.path.insert(0, str(ROOT))
 
 
 def main() -> int:
-    from scripts.run_benchmark import main as run
+    from scripts.run_with_progress import main as run
     legacy = {"--construction-concurrency", "--evaluation-concurrency", "--api-config", "--resume",
               "--stage", "--rescore", "--analysis-only", "--config"}
     if any(arg.split("=", 1)[0] in legacy for arg in sys.argv[1:]):

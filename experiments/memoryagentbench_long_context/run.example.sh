@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PROGRESS_INTERVAL=10                     # 进度刷新间隔（秒），不影响实验配置
+
 # 复制为 run.sh 并填写本段配置后，直接执行 ./run.sh。
 MODE="core"                              # smoke / core / full
 CONDA_ENV="membase-mab-longcontext"        # 已安装依赖的 Conda 环境名
@@ -29,7 +31,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 export OPENAI_API_KEY
 
-exec "${python_command[@]}" "${repo_root}/scripts/run_benchmark.py" \
+exec "${python_command[@]}" "${repo_root}/scripts/run_with_progress.py" --progress-interval "$PROGRESS_INTERVAL" \
   --benchmark memoryagentbench \
   --baseline long_context \
   --mode "$MODE" \
