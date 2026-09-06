@@ -158,7 +158,7 @@ FactExtractor
 
 ### 4.1 必做数据集
 
-1. **MemoryAgentBench FactConsolidation-SH/MH**：第一项低成本杀戮测试（kill test）。单跳部分检验事实替代，多跳部分检验更新能否传播到最终答案。
+1. **MemoryAgentBench FactConsolidation-SH/MH**：第一项实验。主要评估范围固定为 6k、32k，各包含单跳（single-hop）与多跳（multi-hop），共四个完整子集、400 个问题；单跳（single-hop）检验事实替代，多跳（multi-hop）检验更新后的事实能否用于最终回答。所有方法在相同范围重新评估，分别报告四组结果与成本。该范围是本项目的选择，不是 MAB 官方主表范围；64k、262k 留作规模扩展，如需与官方主表对齐则补充 262k。
 2. **MEME**：核心机制主实验。完整报告精确召回、聚合、跟踪、删除、级联和信息缺失，重点分析删除、一跳/两跳级联和无法安全推出新结论时的拒答。数据中的黄金依赖边只用于评测，不能输入系统。
 3. **LoCoMo**：标准长期对话效用。报告第 1--4 类问题的准确率、多跳与时间分类结果、证据召回和成本；所有方法必须使用相同的图像信息、回答模型、评判模型和检索数量。
 4. **LongMemEval-S**：标准跨会话效用。报告总体和知识更新（knowledge update）、跨会话推理（multi-session reasoning）、时间推理（temporal reasoning）等分类准确率。
