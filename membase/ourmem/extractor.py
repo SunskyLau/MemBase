@@ -232,7 +232,8 @@ class FactExtractor:
                 "output_schema": ExtractionOutput.model_json_schema(),
             }
             try:
-                result = self.llm.request_json("extract", FACT_EXTRACTION_PROMPT, payload, validator=validate)
+                from .structured_output import request_json
+                result = request_json(self.llm, self.config, "extract", FACT_EXTRACTION_PROMPT, payload, validator=validate)
             except ContextLimitError:
                 if last_result is not None:
                     return last_result

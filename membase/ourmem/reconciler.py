@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 
 from .extractor import FactDraft
 from .models import InputPolicy, Record, SourceSpan, TimePoint
+from .structured_output import request_json
 
 
 RECONCILIATION_PROMPT = """Reconcile proposed content against supplied memory candidates.
@@ -16,6 +17,11 @@ output_schema. Identity and operation are separate decisions.
 
 identity: REUSE selects an existing memory_key in candidates; NEW proposes an
 identity_description and leaves memory_key null. Persistent ids are assigned by code.
+For ordinary NEW + ADD, use memory_key=null and target_id=null, and put the semantic
+identity ONLY in identity_description. Do not invent a persistent key. For REUSE,
+copy candidates[].memory_key, not candidates[].id; target_id is the corresponding id.
+Candidates are listed once in candidates; evidence_context contains their sources,
+dependencies and controls, not another copy of the candidate list.
 action: ADD, SUPPLEMENT, REVISE, RETRACT, DELETE, CONFLICT, or DEFER.
 target_id: supplied memory version when targeting an existing version, otherwise null.
 revision_reason: update, correction, reconfirmation, override, or null.
@@ -101,6 +107,13 @@ class MemoryReconciler:
         self.llm = llm
         self.config = config
 
+    @staticmethod
+    def payload(draft, candidates, input_policy, identity_recheck=False, evidence_context=None):
+        return {"proposed_content": draft.model_dump(mode="json"), "candidates": candidates,
+                "input_policy": input_policy.model_dump(mode="json"), "identity_recheck": identity_recheck,
+                "evidence_context": {k: v for k, v in (evidence_context or {}).items() if k != "versions"},
+                "output_schema": CoordinationDecision.model_json_schema()}
+
     def reconcile(
         self,
         draft: FactDraft,
@@ -157,15 +170,8 @@ class MemoryReconciler:
                     raise ValueError("Only an explicitly conflicted version can be resolved")
             return decision
 
-        return self.llm.request_json(
-            "reconcile", RECONCILIATION_PROMPT,
-            {
-                "proposed_content": draft.model_dump(mode="json"),
-                "candidates": candidates,
-                "input_policy": input_policy.model_dump(mode="json"),
-                "identity_recheck": identity_recheck,
-                "evidence_context": evidence_context or {},
-                "output_schema": CoordinationDecision.model_json_schema(),
-            },
+        return request_json(
+            self.llm, self.config, "reconcile", RECONCILIATION_PROMPT,
+            self.payload(draft, candidates, input_policy, identity_recheck, evidence_context),
             validator=validate,
         )

@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import Field
 
 from .models import PremiseRef, Record, TimePoint, TimeScope
+from .structured_output import request_json
 
 
 INDUCTION_PROMPT = """Discover a bounded local graph of useful, evidence-grounded memory.
@@ -20,6 +21,25 @@ claims use temporary_id, content, valid_time and modality. dependencies use temp
 target_id (an existing version or a temporary claim), premise_refs, effect SUPPORT/INVALIDATE,
 and effective_time. Claims can depend on earlier temporary claims and on existing claims;
 you may propose several layers in one response, not only fact-to-claim pairs.
+
+NEW CLAIMS AND THEIR REFERENCES:
+- There is NO minimum number of claims. If the evidence only repeats existing facts,
+  return claims=[] and do not create redundant dependencies. Empty discovery is normal.
+- Every new temporary claim must be the target_id of at least one SUPPORT dependency.
+  A SUPPORT to an existing mem id does NOT support a similarly worded temporary claim.
+- Each SUPPORT for a new claim must contain at least one memory premise: CURRENT or
+  HISTORICAL referring to a supplied version, or CURRENT referring to another temporary
+  claim. A single SOURCE premise is also source-only and is NOT a valid new derivation.
+- CURRENT/HISTORICAL ids come from version_ids (CURRENT may also use temporary claim
+  ids). SOURCE ids come from source_ids and require the supplied source span. Never
+  relabel a source id as CURRENT. HISTORICAL cannot refer to a newly proposed claim.
+- SOURCE remains available for legitimate source evidence on existing versions or
+  controls. Do not invent a new claim merely to re-extract the original utterance.
+- Before returning JSON, check every temporary claim has a correctly targeted SUPPORT
+  and every reference belongs to the collection indicated by its type. If no useful
+  supported claim can be formed, remove the proposal rather than fabricate its premises.
+- Empty new claims do not remove scheduled obligations: handle every repair_target;
+  use DEFERRED with a reason when the required evidence is insufficient.
 
 SCHEDULED REPAIRS ARE NOT THE RETRIEVED CONTEXT:
 - repair_targets is the exhaustive list of versions scheduled for disposition.
@@ -59,6 +79,9 @@ SCHEDULED REPAIRS ARE NOT THE RETRIEVED CONTEXT:
 - gap_queries are focused missing-object/condition/evidence lookups, up to the supplied cap.
   open_queries are optional discovery questions only when q_max > 0. Both consume budget.
 - control_reviews concern only supplied prior control operations affected by current evidence,
+  and operation_id must belong to reviewable_operation_ids. If that list is empty,
+  return control_reviews=[]; pending, resolve_pending, conflict and deletion records
+  are context, not eligible review targets.
   NOT a global audit. Give operation_id, decision RETAIN/REVOKE/DEFERRED, evidence_refs and
   reason. Ordinary later changes do not revoke an earlier closure; correction/deletion of
   its actual justification may require review. REVOKE needs positive evidence the control
@@ -193,6 +216,19 @@ class DependencyInducer:
         self.llm = llm
         self.config = config
 
+    def generation_payload(self, context, repair_targets):
+        return {**context, "repair_targets": repair_targets,
+                "reviewable_operation_ids": [op["id"] for op in context.get("operations", [])
+                                             if op["kind"] in {"close", "supersede", "correct"}],
+                "limits": {key: getattr(self.config, key) for key in (
+                    "max_claims_per_call", "max_dependencies_per_call", "max_premises_per_dependency",
+                    "max_claim_depth", "max_gap_queries_per_call", "q_max")},
+                "output_schema": LocalGraphProposal.model_json_schema()}
+
+    @staticmethod
+    def verification_payload(payload):
+        return {**payload, "output_schema": VerificationResult.model_json_schema()}
+
     def propose(self, context: dict, repair_targets: list[str]) -> LocalGraphProposal:
         def validate(raw: dict) -> LocalGraphProposal:
             proposal = LocalGraphProposal.model_validate(raw)
@@ -210,32 +246,38 @@ class DependencyInducer:
             dependency_ids = [dep.temporary_id for dep in proposal.dependencies]
             if len(dependency_ids) != len(set(dependency_ids)):
                 raise ValueError("Temporary dependency ids must be unique")
-            supplied = set(context["version_ids"]) | set(context["source_ids"])
-            available = supplied | set(claims)
+            versions, sources = set(context["version_ids"]), set(context["source_ids"])
+            supplied = versions | sources
+            memory_ids = versions | set(claims)
+            errors = []
             for dep in proposal.dependencies:
-                if dep.target_id not in set(context["version_ids"]) | set(claims):
-                    raise ValueError("Unknown dependency target")
+                label = f"dependency {dep.temporary_id!r} (target_id={dep.target_id!r})"
+                if dep.target_id not in memory_ids:
+                    errors.append(f"{label}: Unknown dependency target; choose a version_id or proposed temporary_id.")
                 if len(dep.premise_refs) > self.config.max_premises_per_dependency:
-                    raise ValueError("Too many direct premises")
+                    errors.append(f"{label}: Too many direct premises.")
                 for ref in dep.premise_refs:
-                    if ref.id not in available:
-                        raise ValueError("Premise was not supplied or proposed")
-                    if ref.type == "SOURCE" and ref.id not in context["source_ids"]:
-                        raise ValueError("SOURCE must reference an actual source")
+                    allowed = sources if ref.type == "SOURCE" else (versions if ref.type == "HISTORICAL" else memory_ids)
+                    if ref.id not in allowed:
+                        collection = "source_ids" if ref.type == "SOURCE" else (
+                            "existing version_ids" if ref.type == "HISTORICAL" else "version_ids or another temporary claim")
+                        errors.append(f"{label}: {ref.type} premise {ref.id!r} is not in {collection}; do not change a source id's type to pretend it is memory.")
                     if ref.id == dep.target_id:
-                        raise ValueError("Self-support or self-invalidation is not permitted")
+                        errors.append(f"{label}: Self-support or self-invalidation is not permitted.")
                 if dep.effect == "INVALIDATE" and dep.effective_time is None:
-                    raise ValueError("INVALIDATE requires a justified effective boundary")
-                if (dep.effect == "INVALIDATE" and dep.effective_time.date is None
+                    errors.append(f"{label}: INVALIDATE requires a justified effective boundary.")
+                elif (dep.effect == "INVALIDATE" and dep.effective_time.date is None
                         and dep.effective_time.order is None):
-                    raise ValueError("INVALIDATE cannot use an empty time boundary")
+                    errors.append(f"{label}: INVALIDATE cannot use an empty time boundary.")
                 if dep.effect == "INVALIDATE" and dep.target_id in claims:
-                    raise ValueError("INVALIDATE closes an existing version, not a new temporary claim")
+                    errors.append(f"{label}: INVALIDATE closes an existing version, not a new temporary claim.")
                 if dep.target_id in claims and all(ref.type == "SOURCE" for ref in dep.premise_refs):
-                    raise ValueError("Derived claims must use atomic memory premises, not bypass them with raw sources")
+                    errors.append(f"{label}: Derived claims must use atomic memory premises, not bypass them with raw sources. Use supplied CURRENT/HISTORICAL memory premises or another temporary claim, not source-only support. Remove a redundant claim instead of paraphrasing a fact.")
             for claim_id in claims:
                 if not any(d.effect == "SUPPORT" and d.target_id == claim_id for d in proposal.dependencies):
-                    raise ValueError("Every proposed claim needs an explicit support path")
+                    errors.append(f"claim {claim_id!r}: Every proposed claim needs an explicit support path. Add SUPPORT with target_id={claim_id!r}; support targeting an existing mem id does not support this temporary claim. Remove the claim if no new inference is needed.")
+            if errors:
+                raise ValueError("Correct ALL reference/support errors together:\n" + "\n".join(errors))
             actual_targets = [repair.target_id for repair in proposal.repairs]
             if len(actual_targets) != len(set(actual_targets)) or set(actual_targets) != set(repair_targets):
                 missing = sorted(set(repair_targets) - set(actual_targets))
@@ -269,14 +311,9 @@ class DependencyInducer:
                     raise ValueError("Control review evidence was not supplied")
             return proposal
 
-        return self.llm.request_json(
-            "generate", INDUCTION_PROMPT,
-            {**context, "repair_targets": repair_targets,
-             "limits": {key: getattr(self.config, key) for key in (
-                 "max_claims_per_call", "max_dependencies_per_call",
-                 "max_premises_per_dependency", "max_claim_depth",
-                 "max_gap_queries_per_call", "q_max")},
-             "output_schema": LocalGraphProposal.model_json_schema()},
+        return request_json(
+            self.llm, self.config, "generate", INDUCTION_PROMPT,
+            self.generation_payload(context, repair_targets),
             validator=validate,
         )
 
@@ -304,8 +341,8 @@ class DependencyInducer:
                 calculation.check()
             return result
 
-        return self.llm.request_json(
-            stage, prompt,
-            {**payload, "output_schema": VerificationResult.model_json_schema()},
+        return request_json(
+            self.llm, self.config, stage, prompt,
+            self.verification_payload(payload),
             validator=validate,
         )

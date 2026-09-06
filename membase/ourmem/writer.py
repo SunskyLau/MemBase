@@ -7,13 +7,15 @@ from hashlib import sha256
 import json
 
 from .extractor import ExtractionResult, FactDraft, FactExtractor
-from .inducer import DependencyInducer, DependencyProposal, LocalGraphProposal
-from .llm import ContextLimitError, OutputLimitError
+from .inducer import (DependencyInducer, DependencyProposal, LocalGraphProposal,
+                      INDUCTION_PROMPT, VERIFICATION_PROMPT, CONTROL_VERIFICATION_PROMPT)
+from .llm import ContextLimitError, OutputLimitError, RecoverableModelError, failure_details
 from .models import (
     ControlOperation, DependencyLink, InputPolicy, MaintenanceReport, MemoryVersion,
     PremiseRef, Revision, Source, SourceSpan, TimePoint,
 )
-from .reconciler import CoordinationDecision, MemoryReconciler
+from .reconciler import CoordinationDecision, MemoryReconciler, RECONCILIATION_PROMPT
+from .structured_output import fits_request
 
 
 def _json(value) -> str:
@@ -91,14 +93,9 @@ class MemoryWriter:
                         progress["report"] = report.model_dump(mode="json")
                         self.store.set_progress(key, progress)
                         continue
-                    try:
-                        stage, decision = self._coordinate(
-                            draft, input_policy, source.source_order, prefix, token,
-                        )
-                    except (ContextLimitError, OutputLimitError) as error:
-                        stage = StagedWrite()
-                        decision = CoordinationDecision(identity="NEW", identity_description=draft.content,
-                                                        action="DEFER", reason=str(error))
+                    stage, decision = self._coordinate(
+                        draft, input_policy, source.source_order, prefix, token,
+                    )
                     stored_write = {"changed_ids": stage.changed_ids, "action": decision.action,
                                     "reason": decision.reason}
                     saved = {**progress, "writes": {**progress.get("writes", {}), str(index): stored_write}}
@@ -144,14 +141,19 @@ class MemoryWriter:
     ) -> tuple[StagedWrite, CoordinationDecision]:
         staged = staged or StagedWrite()
         mandatory = [draft.source_id, *[ref.id for ref in draft.evidence_refs]]
+        mandatory.extend(span.source_id for ref in draft.evidence_refs for span in ref.context_refs)
         mandatory.extend(version.id for version in staged.versions)
+        def request(context, recheck=False):
+            return RECONCILIATION_PROMPT, self.reconciler.payload(
+                draft, context["versions"], policy, recheck, context)
         candidates = self._candidates([draft.content], "reconcile", cutoff, prefix,
-                                      mandatory=mandatory, staged=staged)
+                                      mandatory=mandatory, staged=staged, request_builder=request)
         decision = self.reconciler.reconcile(draft, candidates["versions"], policy,
                                              evidence_context=candidates)
         if decision.identity == "NEW" and decision.action != "DEFER":
             checked = self._candidates([draft.content, decision.identity_description],
-                                       "reconcile", cutoff, prefix, mandatory=mandatory, staged=staged)
+                                       "reconcile", cutoff, prefix, mandatory=mandatory, staged=staged,
+                                       request_builder=lambda context: request(context, True))
             # NEW 只再查一次；第二次依然找不到即可由程序分配身份。
             if set(checked["version_ids"]) - set(candidates["version_ids"]):
                 decision = self.reconciler.reconcile(draft, checked["versions"], policy,
@@ -274,6 +276,7 @@ class MemoryWriter:
     def _candidates(
         self, queries: list[str], mode: str, cutoff: int, prefix: SourceSpan,
         mandatory: list[str], staged: StagedWrite | None = None,
+        *, request_builder,
     ) -> dict:
         matches = self.retriever.retrieve(
             queries, mode=mode, mandatory_context=mandatory,
@@ -288,7 +291,9 @@ class MemoryWriter:
                 source_spans.setdefault(match.source_id, []).append(match.span)
         context = self._context(ids, cutoff, prefix, staged, source_spans)
         # 独立语义候选可以少取；已知结构证据不能截成半条路径。
-        while self.llm.count_tokens(_json(context)) > self.config.max_context_tokens - 4000:
+        def fits(value):
+            return fits_request(self.llm, self.config, *request_builder(value))
+        while not fits(context):
             removable = [item for item in ids if item not in mandatory]
             if not removable:
                 raise ContextLimitError("A necessary proof exceeds max_context_tokens")
@@ -437,9 +442,11 @@ class MemoryWriter:
         pending = list(maintenance.pending_ids)
         self._mark_pending(pending, cutoff, "dependency_changed")
         queue: list[tuple[list[str], list[str]]] = [(changed, pending)]
-        def defer(targets, reason):
+        def defer(targets, reason, error=None):
             self._deferred(report, targets, reason)
-            self._remember_scope(progress, source, prefix, "discovery", reason, trigger_ids=triggers)
+            if error is not None:
+                report.results[-1].update(failure_details(error))
+            self._remember_scope(progress, source, prefix, "discovery", reason, trigger_ids=triggers, error=error)
         while queue:
             triggers, targets = queue.pop(0)
             reserved = any(fingerprint not in progress["fingerprints"]
@@ -458,13 +465,19 @@ class MemoryWriter:
                                                         source_span_cutoff=prefix)
             queries.append(visible_source[prefix.start:prefix.end].strip() or "Changed memory controls")
             try:
-                context = self._candidates(queries, "derive", cutoff, prefix, [*triggers, *targets])
+                build_request = lambda value: (INDUCTION_PROMPT, self.inducer.generation_payload(
+                    {**value, "input_policy": policy.model_dump(mode="json")}, targets))
+                context = self._candidates(queries, "derive", cutoff, prefix, [*triggers, *targets],
+                                           request_builder=build_request)
             except ContextLimitError as error:
                 if len(targets) > 1:
                     midpoint = len(targets) // 2
                     queue[0:0] = [(triggers, targets[:midpoint]), (triggers, targets[midpoint:])]
                 else:
-                    defer(targets, str(error))
+                    defer(targets, str(error), error)
+                continue
+            except RecoverableModelError as error:
+                defer(targets, str(error), error)
                 continue
             context["input_policy"] = policy.model_dump(mode="json")
             fingerprint = sha256(_json((context, targets, self.config.model_dump(exclude={"api_key"}))).encode()).hexdigest()
@@ -489,7 +502,14 @@ class MemoryWriter:
                         midpoint = len(targets) // 2
                         queue[0:0] = [(triggers, targets[:midpoint]), (triggers, targets[midpoint:])]
                     else:
-                        defer(targets, str(error))
+                        defer(targets, str(error), error)
+                    continue
+                except RecoverableModelError as error:
+                    # 已用完本次调用的重试，不在刷新或重启时重新抽奖。
+                    task["failure"] = failure_details(error)
+                    progress["fingerprints"].append(fingerprint)
+                    defer(targets, str(error), error)
+                    self.store.set_progress(progress_key, progress)
                     continue
                 task["proposal"] = proposal.model_dump(mode="json")
                 self.store.set_progress(progress_key, progress)
@@ -498,7 +518,7 @@ class MemoryWriter:
                 # 补检只在本次局部调用范围内执行一次，不递归发散。
                 try:
                     extra = self._candidates([*queries, *proposal.gap_queries, *proposal.open_queries],
-                                             "derive", cutoff, prefix, [*triggers, *targets])
+                                             "derive", cutoff, prefix, [*triggers, *targets], request_builder=build_request)
                     extra["input_policy"] = policy.model_dump(mode="json")
                     if (task.get("gap_reserved") or progress["generation_calls"] < self.config.max_generation_calls_per_update):
                         if not task.get("gap_reserved"):
@@ -516,13 +536,20 @@ class MemoryWriter:
                         defer(targets, "gap_generation_budget")
                 except (ContextLimitError, OutputLimitError) as error:
                     task["gap_incomplete"] = True
-                    defer(targets, str(error))
+                    defer(targets, str(error), error)
+                except RecoverableModelError as error:
+                    task["gap_incomplete"] = True
+                    task["gap_failure"] = failure_details(error)
+                    defer(targets, str(error), error)
             token = f"{progress_key}:generation:{task['ordinal']}"
             accepted, failed = self._commit_graph(proposal, context, policy, cutoff, prefix, token)
             progress["fingerprints"].append(fingerprint)
             self.store.set_progress(progress_key, progress)
             report.results.extend(failed)
             report.incomplete |= bool(failed)
+            if failed:
+                self._remember_scope(progress, source, prefix, "discovery", "dependency_verification_incomplete",
+                                     trigger_ids=triggers)
             if not failed and not task.get("gap_incomplete"):
                 progress["pending_scopes"] = [scope for scope in progress["pending_scopes"]
                                                if not (scope["source_id"] == source.id
@@ -548,10 +575,12 @@ class MemoryWriter:
                                "reason": reason, "targets": targets})
 
     @staticmethod
-    def _remember_scope(progress, source, span, stage, reason, trigger_ids=()):
+    def _remember_scope(progress, source, span, stage, reason, trigger_ids=(), error=None):
         scope = {"source_id": source.id, "source_cutoff": source.source_order,
                  "span": span.model_dump(mode="json"), "stage": stage, "reason": reason,
                  "trigger_ids": sorted(trigger_ids)}
+        if error is not None:
+            scope.update(failure_details(error))
         scopes = progress.setdefault("pending_scopes", [])
         scopes[:] = [item for item in scopes if not (item["source_id"] == source.id
                     and item["span"] == scope["span"] and item["stage"] == stage
@@ -593,16 +622,19 @@ class MemoryWriter:
                     refs = [ref.model_copy(update={"id": mapping.get(ref.id, ref.id)}) for ref in dep.premise_refs]
                     resolved_dep = dep.model_copy(update={"premise_refs": refs})
                     premise_ids = [ref.id for ref in refs]
+                    extra_context = {"target": claims[target_id].model_dump(mode="json") if target_id in claims
+                                     else {**self.store.get_version(target_id).model_dump(mode="json", exclude={"namespace", "created_at", "status"}),
+                                           "resolution": self.evaluator.evaluate(target_id, source_cutoff=cutoff).model_dump(mode="json")},
+                                     "input_policy": policy.model_dump(mode="json")}
                     try:
                         verify_context = self._candidates([target_content], "validate", cutoff, prefix,
-                                                           premise_ids + ([target_id] if target_id not in claims else []), staged)
-                    except ContextLimitError as error:
-                        failed.append({"target_id": target_id, "stage": "verify", "reason": str(error)})
+                                                           premise_ids + ([target_id] if target_id not in claims else []), staged,
+                                                           request_builder=lambda value: (VERIFICATION_PROMPT, self.inducer.verification_payload(
+                                                               {**value, **extra_context, "dependency": resolved_dep.model_dump(mode="json")})))
+                    except RecoverableModelError as error:
+                        failed.append({"target_id": target_id, "stage": "verify", **failure_details(error)})
                         continue
-                    verify_context.update(target=claims[target_id].model_dump(mode="json") if target_id in claims
-                                          else {**self.store.get_version(target_id).model_dump(mode="json", exclude={"namespace", "created_at", "status"}),
-                                                "resolution": self.evaluator.evaluate(target_id, source_cutoff=cutoff).model_dump(mode="json")},
-                                          input_policy=policy.model_dump(mode="json"))
+                    verify_context.update(extra_context)
                     try:
                         self._check_premises(refs, verify_context, cutoff, prefix, staged)
                     except ValueError as error:
@@ -610,13 +642,17 @@ class MemoryWriter:
                         continue
                     try:
                         verification = self.inducer.verify(resolved_dep, verify_context)
-                    except (ContextLimitError, OutputLimitError) as error:
-                        failed.append({"target_id": target_id, "stage": "verify", "reason": str(error)})
+                    except RecoverableModelError as error:
+                        failed.append({"target_id": target_id, "stage": "verify", **failure_details(error)})
                         continue
                     if not verification.accepted:
                         failed.append({"target_id": target_id, "stage": "verify", "reason": verification.reason})
                         continue
                     for path in verification.sufficient_paths:
+                        if target_id in claims and all(refs[index].type == "SOURCE" for index in path):
+                            failed.append({"target_id": target_id, "stage": "verify",
+                                           "reason": "Verifier selected source-only support for a derived claim"})
+                            continue
                         verified_links.append(DependencyLink(
                             id=_id("dep", token, dep.temporary_id, path), namespace=self.store.namespace,
                             target_version_id=target_id, premise_refs=[refs[index] for index in path],
@@ -633,8 +669,8 @@ class MemoryWriter:
                     try:
                         target_stage, decision = self._coordinate(draft, policy, cutoff, prefix,
                                                                    f"{token}:{target_id}", staged)
-                    except (ContextLimitError, OutputLimitError) as error:
-                        failed.append({"target_id": target_id, "stage": "reconcile", "reason": str(error)})
+                    except RecoverableModelError as error:
+                        failed.append({"target_id": target_id, "stage": "reconcile", **failure_details(error)})
                         continue
                     if decision.action in {"DEFER", "CONFLICT"}:
                         failed.append({"target_id": target_id, "stage": "reconcile", "reason": decision.reason})
@@ -696,11 +732,17 @@ class MemoryWriter:
                 failed.append({"target_id": operation.target_id, "stage": "control_review", "reason": review.reason})
                 continue
             try:
+                operation_data = operation.model_dump(mode="json", exclude={"namespace", "created_at"})
                 review_context = self._candidates([review.reason], "validate", cutoff, prefix,
-                                                   [operation.target_id, *[ref.id for ref in review.evidence_refs]], staged)
+                                                   [operation.target_id, *[ref.id for ref in review.evidence_refs]], staged,
+                                                   request_builder=lambda value: (CONTROL_VERIFICATION_PROMPT, self.inducer.verification_payload(
+                                                       {**value, "review": review.model_dump(mode="json"), "operation": operation_data})))
                 self._check_premises(review.evidence_refs, review_context, cutoff, prefix, staged)
-                verification = self.inducer.verify_control(review, operation.model_dump(mode="json", exclude={"namespace", "created_at"}), review_context)
-            except (ValueError, ContextLimitError, OutputLimitError) as error:
+                verification = self.inducer.verify_control(review, operation_data, review_context)
+            except RecoverableModelError as error:
+                failed.append({"target_id": operation.target_id, "stage": "control_review", **failure_details(error)})
+                continue
+            except ValueError as error:
                 failed.append({"target_id": operation.target_id, "stage": "control_review", "reason": str(error)})
                 continue
             if not verification.accepted:
