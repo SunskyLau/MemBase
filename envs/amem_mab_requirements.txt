@@ -1,0 +1,13 @@
+# 已有 membase-amem 环境中的实际版本；本轮仅需补齐 pyarrow。
+openai==3.3.1
+pydantic==2.13.4
+numpy==2.5.2
+chromadb==1.5.9
+tiktoken==0.14.0
+smartcomment==0.1.2
+litellm==1.75.9
+jsonschema==4.26.0
+pyarrow==25.0.1
+nltk==3.10.3
+rank-bm25==0.2.2
+scikit-learn==1.9.0

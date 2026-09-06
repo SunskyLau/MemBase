@@ -6,14 +6,9 @@ from .llm_controller import LLMController
 from .retrievers import ChromaRetriever
 import json
 import logging
-from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 import os
 from abc import ABC, abstractmethod
-from transformers import AutoModel, AutoTokenizer
-from nltk.tokenize import word_tokenize
 import pickle
 from pathlib import Path
 from litellm import completion
@@ -44,7 +39,8 @@ class MemoryNote:
                  context: Optional[str] = None,
                  evolution_history: Optional[List] = None,
                  category: Optional[str] = None,
-                 tags: Optional[List[str]] = None):
+                 tags: Optional[List[str]] = None,
+                 preserve_unknown_time: bool = False):
         """Initialize a new memory note with its associated metadata.
         
         Args:
@@ -73,8 +69,8 @@ class MemoryNote:
         
         # Temporal information
         current_time = datetime.now().strftime("%Y%m%d%H%M")
-        self.timestamp = timestamp or current_time
-        self.last_accessed = last_accessed or current_time
+        self.timestamp = (timestamp or "") if preserve_unknown_time else (timestamp or current_time)
+        self.last_accessed = (last_accessed or "") if preserve_unknown_time else (last_accessed or current_time)
         
         # Usage and evolution data
         self.retrieval_count = retrieval_count or 0
@@ -100,7 +96,8 @@ class AgenticMemorySystem:
                  embedder_provider: Literal["sentence-transformers", "openai"] = "sentence-transformers",
                  embedding_api_key: Optional[str] = None, 
                  embedding_base_url: Optional[str] = None,
-                 user_id: Optional[str] = None):  
+                 user_id: Optional[str] = None, shared_client=None,
+                 collection_name: Optional[str] = None, preserve_unknown_time: bool = False):
         """Initialize the memory system.
         
         Args:
@@ -123,55 +120,20 @@ class AgenticMemorySystem:
         self.base_url = base_url 
         self.user_id = user_id
 
-        # Initialize ChromaDB retriever with empty collection
-
-        self.user_id = user_id 
-        try:
-            # First try to reset the collection if it exists
-            if user_id is None:
-                temp_retriever = ChromaRetriever(
-                    collection_name="memories", 
-                    model_name=self.model_name,
-                    embedder_provider=embedder_provider,
-                    api_key=embedding_api_key,
-                    base_url=embedding_base_url  
-                )
-                temp_retriever.client.reset()
-            else:
-                # To support multiple users in parallel, we use different collections for each user.
-                # And we don't reset the client as it may delete previous created collections.  
-                temp_retriever = ChromaRetriever(
-                    collection_name=f"memories_{user_id}", 
-                    model_name=self.model_name,
-                    embedder_provider=embedder_provider,
-                    api_key=embedding_api_key,
-                    base_url=embedding_base_url  
-                )
-                # We just delete a specific collection. 
-                temp_retriever.client.delete_collection(f"memories_{user_id}")
-        except Exception as e:
-            logger.warning(f"Could not reset ChromaDB collection: {e}")
-            
-        # Create a fresh retriever instance
-        if user_id is None:
-            self.retriever = ChromaRetriever(
-                collection_name="memories", 
-                model_name=self.model_name,
-                embedder_provider=embedder_provider,
-                api_key=embedding_api_key,
-                base_url=embedding_base_url  
-            )
-        else:
-            self.retriever = ChromaRetriever(
-                collection_name=f"memories_{user_id}", 
-                model_name=self.model_name,
-                embedder_provider=embedder_provider,
-                api_key=embedding_api_key,
-                base_url=embedding_base_url  
-            )
-        
-        # Initialize LLM controller
-        self.llm_controller = LLMController(llm_backend, llm_model, api_key, base_url)
+        self.shared_client = shared_client
+        self.preserve_unknown_time = preserve_unknown_time
+        self.collection_name = collection_name or f"memories_{user_id or uuid.uuid4().hex}"
+        self.warnings = []
+        self.dirty = False
+        options = dict(collection_name=self.collection_name, model_name=self.model_name,
+                       embedder_provider=embedder_provider, api_key=embedding_api_key,
+                       base_url=embedding_base_url, model_client=shared_client)
+        self.retriever = ChromaRetriever(**options)
+        if self.retriever.collection.count():
+            # 仅清理本样本的临时索引；持久化检查点和其他集合不受影响。
+            self.retriever.client.delete_collection(self.collection_name)
+            self.retriever = ChromaRetriever(**options)
+        self.llm_controller = LLMController(llm_backend, llm_model, api_key, base_url, shared_client)
         self.evo_cnt = 0
         self.evo_threshold = evo_threshold
 
@@ -208,6 +170,14 @@ class AgenticMemorySystem:
                                 }}
                                 '''
         
+    def _record_fallback(self, error, stage):
+        if self.shared_client is not None:
+            from ...inference_utils.model_client import RecoverableModelError, failure_details
+            if not isinstance(error, RecoverableModelError):
+                raise error
+            self.warnings.append({"stage": stage, **failure_details(error)})
+        logger.warning("A-MEM %s fallback: %s", stage, error)
+
     def analyze_content(self, content: str) -> Dict:            
         """Analyze content using LLM to extract semantic metadata.
         
@@ -279,7 +249,7 @@ class AgenticMemorySystem:
                     }})
             return json.loads(response)
         except Exception as e:
-            print(f"Error analyzing content: {e}")
+            self._record_fallback(e, "analysis")
             return {"keywords": [], "context": "General", "tags": []}
 
     def add_note(self, content: str, time: str = None, **kwargs) -> str:
@@ -287,7 +257,7 @@ class AgenticMemorySystem:
         # Create MemoryNote without llm_controller
         if time is not None:
             kwargs['timestamp'] = time
-        note = MemoryNote(content=content, **kwargs)
+        note = MemoryNote(content=content, preserve_unknown_time=self.preserve_unknown_time, **kwargs)
         
         # 🔧 LLM Analysis Enhancement: Auto-generate attributes using LLM if they are empty or default values
         needs_analysis = (
@@ -309,7 +279,7 @@ class AgenticMemorySystem:
                     note.tags = analysis.get("tags", [])
                     
             except Exception as e:
-                print(f"Warning: LLM analysis failed, using default values: {e}")
+                self._record_fallback(e, "analysis")
         
         # Update retriever with all documents
         evo_label, note = self.process_memory(note)
@@ -330,6 +300,7 @@ class AgenticMemorySystem:
             "tags": note.tags
         }
         self.retriever.add_document(note.content, metadata, note.id)
+        self.dirty = True
         
         if evo_label == True:
             self.evo_cnt += 1
@@ -339,23 +310,8 @@ class AgenticMemorySystem:
     
     def consolidate_memories(self):
         """Consolidate memories: update retriever with new documents"""
-        # Reset ChromaDB collection
-        if self.user_id is None:
-            self.retriever = ChromaRetriever(
-                collection_name="memories",
-                model_name=self.model_name,
-                embedder_provider=self.embedder_provider,
-                api_key=self.embedding_api_key,
-                base_url=self.embedding_base_url 
-            )
-        else:
-            self.retriever = ChromaRetriever(
-                collection_name=f"memories_{self.user_id}",
-                model_name=self.model_name,
-                embedder_provider=self.embedder_provider,
-                api_key=self.embedding_api_key,
-                base_url=self.embedding_base_url 
-            )
+        if not self.dirty:
+            return
         # Re-add all memory documents with their complete metadata
         for memory in self.memories.values():
             metadata = {
@@ -372,8 +328,9 @@ class AgenticMemorySystem:
                 "tags": memory.tags
             }
             self.retriever.add_document(memory.content, metadata, memory.id)
+        self.dirty = False
     
-    def find_related_memories(self, query: str, k: int = 5) -> Tuple[str, List[int]]:
+    def find_related_memories(self, query: str, k: int = 5) -> Tuple[str, List[str]]:
         """Find related memories using ChromaDB retrieval"""
         if not self.memories:
             return "", []
@@ -392,11 +349,13 @@ class AgenticMemorySystem:
                     if i < len(results['metadatas'][0]):
                         metadata = results['metadatas'][0][i]
                         # Format memory string
-                        memory_str += f"memory index:{i}\ttalk start time:{metadata.get('timestamp', '')}\tmemory content: {metadata.get('content', '')}\tmemory context: {metadata.get('context', '')}\tmemory keywords: {str(metadata.get('keywords', []))}\tmemory tags: {str(metadata.get('tags', []))}\n"
-                        indices.append(i)
+                        memory_str += f"memory_id:{doc_id}\ttalk start time:{metadata.get('timestamp', '')}\tmemory content: {metadata.get('content', '')}\tmemory context: {metadata.get('context', '')}\tmemory keywords: {str(metadata.get('keywords', []))}\tmemory tags: {str(metadata.get('tags', []))}\n"
+                        indices.append(doc_id)
                     
             return memory_str, indices
         except Exception as e:
+            if self.shared_client is not None:
+                raise
             logger.error(f"Error in find_related_memories: {str(e)}")
             return "", []
 
@@ -672,6 +631,8 @@ class AgenticMemorySystem:
             
             return memories[:k]
         except Exception as e:
+            if self.shared_client is not None:
+                raise
             logger.error(f"Error in search_agentic: {str(e)}")
             return []
 
@@ -690,8 +651,8 @@ class AgenticMemorySystem:
             
         try:
             # Get nearest neighbors
-            neighbors_text, indices = self.find_related_memories(note.content, k=5)
-            if not neighbors_text or not indices:
+            neighbors_text, memory_ids = self.find_related_memories(note.content, k=5)
+            if not neighbors_text or not memory_ids:
                 return False, note
                 
             # Format neighbors for LLM - in this case, neighbors_text is already formatted
@@ -702,7 +663,7 @@ class AgenticMemorySystem:
                 context=note.context,
                 keywords=note.keywords,
                 nearest_neighbors_memories=neighbors_text,
-                neighbor_number=len(indices)
+                neighbor_number=len(memory_ids)
             )
             
             try:
@@ -772,44 +733,22 @@ class AgenticMemorySystem:
                         elif action == "update_neighbor":
                             new_context_neighborhood = response_json["new_context_neighborhood"]
                             new_tags_neighborhood = response_json["new_tags_neighborhood"]
-                            noteslist = list(self.memories.values())
-                            notes_id = list(self.memories.keys())
-                            
-                            for i in range(min(len(indices), len(new_tags_neighborhood))):
-                                # Skip if we don't have enough neighbors
-                                if i >= len(indices):
+                            # 官方修复：按真实标识更新，而非检索位置或字典插入顺序。
+                            for i, memory_id in enumerate(memory_ids[:len(new_tags_neighborhood)]):
+                                if memory_id not in self.memories:
                                     continue
-                                    
-                                tag = new_tags_neighborhood[i]
+                                neighbor = self.memories[memory_id]
+                                neighbor.tags = new_tags_neighborhood[i]
                                 if i < len(new_context_neighborhood):
-                                    context = new_context_neighborhood[i]
-                                else:
-                                    # Since indices are just numbers now, we need to find the memory
-                                    # In memory list using its index number
-                                    if i < len(noteslist):
-                                        context = noteslist[i].context
-                                    else:
-                                        continue
-                                        
-                                # Get index from the indices list
-                                if i < len(indices):
-                                    memorytmp_idx = indices[i]
-                                    # Make sure the index is valid
-                                    if memorytmp_idx < len(noteslist):
-                                        notetmp = noteslist[memorytmp_idx]
-                                        notetmp.tags = tag
-                                        notetmp.context = context
-                                        # Make sure the index is valid
-                                        if memorytmp_idx < len(notes_id):
-                                            self.memories[notes_id[memorytmp_idx]] = notetmp
+                                    neighbor.context = new_context_neighborhood[i]
                                 
                 return should_evolve, note
                 
             except (json.JSONDecodeError, KeyError, Exception) as e:
-                logger.error(f"Error in memory evolution: {str(e)}")
+                self._record_fallback(e, "evolution")
                 return False, note
                 
         except Exception as e:
             # For testing purposes, catch all exceptions and return the original note
-            logger.error(f"Error in process_memory: {str(e)}")
+            self._record_fallback(e, "evolution")
             return False, note

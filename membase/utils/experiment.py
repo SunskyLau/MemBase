@@ -70,9 +70,11 @@ def start_run(run_dir: Path, config: dict, protocol: dict) -> None:
 
 
 def finish_run(run_dir: Path, summary: dict) -> None:
+    warnings = bool(summary.get("technical_failure_questions") or summary.get("memory_warning_samples"))
     write_json(run_dir / "summary.json", summary)
-    write_json(run_dir / "status.json", {"status": "complete"})
-    print(f"全量完成：{run_dir / 'summary.json'}")
+    write_json(run_dir / "status.json", {"status": "complete_with_warnings" if warnings else "complete"})
+    label = "流程结束（含技术失败计零或记忆维护缺口，请查看汇总）" if warnings else "全量完成"
+    print(f"{label}：{run_dir / 'summary.json'}")
 
 
 def fail_run(run_dir: Path, error: Exception) -> None:

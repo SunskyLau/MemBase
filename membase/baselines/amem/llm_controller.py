@@ -11,7 +11,12 @@ class BaseLLMController(ABC):
         pass
 
 class OpenAIController(BaseLLMController):
-    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, base_url: Optional[str] = None):
+    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, base_url: Optional[str] = None, shared_client=None):
+        self.shared_client = shared_client
+        self.input_policy = None
+        self.model = model
+        if shared_client is not None:
+            return
         try:
             from openai import OpenAI
             self.model = model
@@ -27,6 +32,25 @@ class OpenAIController(BaseLLMController):
             raise ImportError("OpenAI package not found. Install it with: pip install openai")
     
     def get_completion(self, prompt: str, response_format: dict, temperature: float = 0.7) -> str:
+        if self.shared_client is not None:
+            from jsonschema import validate, ValidationError
+            schema = response_format.get("json_schema", {}).get("schema")
+            def check(value):
+                try:
+                    if schema is not None:
+                        validate(value, schema)
+                except ValidationError as error:
+                    raise ValueError(error.message) from error
+                return value
+            supplied_prompt = prompt
+            if self.input_policy:
+                supplied_prompt += "\n\nPublic task input rules (not a memory note):\n" + json.dumps(self.input_policy, ensure_ascii=False)
+            result = self.shared_client.request_json(
+                "amem_analyze" if prompt.startswith("Generate a structured analysis") else "amem_evolve",
+                supplied_prompt, model=self.model, system="You must respond with a JSON object.",
+                response_format=response_format, temperature=temperature, max_tokens=1000,
+                use_seed=False, validator=check)
+            return json.dumps(result, ensure_ascii=False)
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -92,9 +116,9 @@ class LLMController:
                  backend: Literal["openai", "ollama"] = "openai",
                  model: str = "gpt-4", 
                  api_key: Optional[str] = None, 
-                 base_url: Optional[str] = None):
+                 base_url: Optional[str] = None, shared_client=None):
         if backend == "openai":
-            self.llm = OpenAIController(model, api_key, base_url)
+            self.llm = OpenAIController(model, api_key, base_url, shared_client)
         elif backend == "ollama":
             self.llm = OllamaController(model)
         else:

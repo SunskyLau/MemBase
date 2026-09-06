@@ -32,7 +32,7 @@ def main(argv=None, *, stages=None) -> int:
     parser.add_argument("--check-workers", type=int, default=8)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--embedding-model", default="text-embedding-3-small")
-    parser.add_argument("--memory-config", type=Path, help="OurMem 可选参数 JSON；不包含凭据")
+    parser.add_argument("--memory-config", type=Path, help="记忆方法可选参数 JSON；不包含凭据")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-llm-requests", type=int)
     parser.add_argument("--max-embedding-requests", type=int)
@@ -43,16 +43,16 @@ def main(argv=None, *, stages=None) -> int:
     from membase.datasets import memoryagentbench, meme
     from membase.runners.benchmark import BenchmarkRunConfig
     allowed = {"locomo": {"ourmem"}, "longmemeval": {"ourmem"},
-               "memoryagentbench": {"long_context", "bm25", "ourmem"},
+               "memoryagentbench": {"long_context", "bm25", "ourmem", "amem"},
                "meme": {"in_context", "bm25", "dense", "md_flat", "ourmem"}}
     if args.baseline not in allowed[args.benchmark]:
         parser.error(f"{args.benchmark} 支持的基线：{sorted(allowed[args.benchmark])}")
-    if stages is not None and args.baseline != "ourmem":
+    if stages is not None and args.baseline not in {"ourmem", "amem"}:
         parser.error("官方原生基线使用一键入口，不支持独立三阶段执行")
-    if args.baseline == "ourmem":
+    if args.baseline in {"ourmem", "amem"}:
         from membase.datasets.official import default_paths
         default_data, default_upstream = default_paths(args.benchmark)
-        if args.top_k is not None:
+        if args.baseline == "ourmem" and args.top_k is not None:
             parser.error("OurMem 使用分阶段候选预算，不接受单一 --top-k；请使用 --memory-config")
         if any(value is not None and value < 0 for value in (args.max_llm_requests, args.max_embedding_requests)):
             parser.error("请求上限必须非负；不设置表示不限制")
@@ -88,10 +88,10 @@ def main(argv=None, *, stages=None) -> int:
 def execute_config(config, *, stages=None):
     from membase.runners import memoryagentbench as mab_runner, meme as meme_runner
     runner = mab_runner if config.benchmark == "memoryagentbench" else meme_runner
-    if config.baseline == "ourmem":
+    if config.baseline in {"ourmem", "amem"}:
         from membase.runners import protocol as runner
     try:
-        if config.baseline == "ourmem":
+        if config.baseline in {"ourmem", "amem"}:
             runner.run(config, stages=stages or ("construction", "search", "evaluation"))
         else:
             runner.run(config)

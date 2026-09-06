@@ -43,7 +43,7 @@ def retrieve_question(layer, qa_pair, *, k=10, snapshot_id=None, query_time=None
 def validate_retrieval(record):
     if not isinstance(record.get("context"), str) or not isinstance(record.get("retrieved_memories"), list):
         raise ValueError("Invalid saved retrieval context")
-    if record.get("resolution_status") not in {"resolved", "unknown", "conflict", "deleted", "incomplete"}:
+    if record.get("resolution_status") not in {"resolved", "unknown", "conflict", "deleted", "incomplete", "not_assessed"}:
         raise ValueError("Missing retrieval resolution status")
     if not isinstance(record.get("coverage"), dict) or not isinstance(record.get("read_trace"), list):
         raise ValueError("Missing retrieval audit")
@@ -54,17 +54,42 @@ def search_phase(runtime, sample, phase, layer, snapshot_id, *, answer_now=False
     from .evaluation import answer_question
     from ..utils.benchmark_files import write_json
     from ..evaluation.official import validate_answers
+    from ..inference_utils.model_client import RecoverableModelError
+    from .question_outcomes import read_failure, save_failure, failure_result, stored_failure_result
     folder = runtime.directory(sample) / phase.name
     rows = []
     for question in tqdm(phase.questions, desc=f"{sample.key}/{phase.name} 检索", leave=False):
+        failure = read_failure(runtime, sample, phase, question, snapshot_id)
+        if failure is not None:
+            rows.append(stored_failure_result(runtime, sample, phase, question, failure))
+            continue
         pair = question.as_pair()
         identity = {"question_id": question.id, "question": question.text, "snapshot_id": snapshot_id}
         path = question_file(folder / "retrievals", question.id)
         if path.exists():
             record = checked(path, identity, "检索结果")
         else:
-            entries = retrieve_question(layer, pair, snapshot_id=snapshot_id, query_time=pair.timestamp)
-            audit = entries[0].metadata if len(entries) == 1 else {}
+            try:
+                entries = retrieve_question(layer, pair, k=runtime.config.top_k, snapshot_id=snapshot_id, query_time=pair.timestamp)
+            except RecoverableModelError as error:
+                failure = save_failure(runtime, sample, phase, question, snapshot_id, "retrieval", error)
+                rows.append(failure_result(failure))
+                continue
+            if runtime.config.baseline == "amem":
+                original = entries
+                entries, omitted = [], []
+                for entry in original:
+                    text = "\n\n".join(e.formatted_content or e.content for e in [*entries, entry])
+                    if (client or runtime.client).count_tokens(text) <= runtime.memory_config.max_evidence_tokens:
+                        entries.append(entry)
+                    else:
+                        omitted.append(entry.metadata["id"])
+                audit = {"resolution_status": "not_assessed", "reason": "baseline_retrieval_only", "evidence_refs": [],
+                         "coverage": {"top_k": runtime.config.top_k, "returned": len(entries), "omitted_ids": omitted,
+                                      "token_budget": runtime.memory_config.max_evidence_tokens},
+                         "read_trace": [{"phase": "amem_retrieval", "candidate_count": len(original), "assessed": False}]}
+            else:
+                audit = entries[0].metadata if len(entries) == 1 else {}
             record = {**identity, "user_id": sample.namespace, "qa_pair": pair.model_dump(mode="json"),
                       "retrieved_memories": [entry.model_dump(mode="json") for entry in entries],
                       "context": "\n\n".join(entry.formatted_content or entry.content for entry in entries),
@@ -81,7 +106,12 @@ def search_phase(runtime, sample, phase, layer, snapshot_id, *, answer_now=False
                 answer = checked(path, {**identity, "retrieval_sha256": digest(record)}, "观察点回答")
                 validate_answers([answer], (question,))
             else:
-                answer = answer_question(runtime.config, sample, question, record, client or runtime.client)
+                try:
+                    answer = answer_question(runtime.config, sample, question, record, client or runtime.client)
+                except RecoverableModelError as error:
+                    failure = save_failure(runtime, sample, phase, question, snapshot_id, "answer", error, payload=record)
+                    rows.append(failure_result(failure))
+                    continue
                 write_json(path, answer)
             rows.append(answer)
         else:
@@ -93,8 +123,13 @@ def search_phase(runtime, sample, phase, layer, snapshot_id, *, answer_now=False
 def require_observation_answers(runtime, sample, phase, snapshot_id):
     from .protocol import checked, question_file, digest
     from ..evaluation.official import validate_answers
+    from .question_outcomes import read_failure, stored_failure_result
     records = []
     for question in phase.questions:
+        failure = read_failure(runtime, sample, phase, question, snapshot_id)
+        if failure is not None:
+            records.append(stored_failure_result(runtime, sample, phase, question, failure))
+            continue
         identity = {"question_id": question.id, "question": question.text, "snapshot_id": snapshot_id}
         folder = runtime.directory(sample) / phase.name
         retrieval_path = question_file(folder / "retrievals", question.id)

@@ -12,7 +12,9 @@ import sqlite3
 
 STAGES = {"extract": "抽取", "reconcile": "协调", "generate": "派生/修复",
           "verify": "依赖验证", "verify_control": "控制复核", "embedding": "嵌入",
-          "read_plan": "问题分解", "read_assess": "证据判断", "answer": "回答", "judge": "评分"}
+          "read_plan": "问题分解", "read_assess": "证据判断", "answer": "回答", "judge": "评分",
+          "amem_analyze": "A-MEM 笔记分析", "amem_evolve": "A-MEM 演化",
+          "amem_build_embedding": "A-MEM 构建嵌入", "amem_search_embedding": "A-MEM 检索嵌入"}
 
 
 def read_record(path: Path) -> dict:
@@ -51,7 +53,8 @@ class ExperimentProgress:
         for kind, label in (("llm", "模型"), ("embedding", "嵌入")):
             total = sum(n for (category, _), n in counts.items() if category == kind)
             failed = counts.get((kind, "failed"), 0)
-            values.append(f"{label}请求 {total}（失败 {failed}）")
+            invalid = counts.get((kind, "validation_failed"), 0)
+            values.append(f"{label}请求 {total}（接口失败 {failed}；校验失败 {invalid}）")
         if pending:
             started = datetime.fromisoformat(pending[1])
             if started.tzinfo is None:
@@ -67,10 +70,16 @@ class ExperimentProgress:
             folder, manifest = path.parent, read_record(path)
             label = folder.relative_to(self.run_dir / "samples").as_posix()
             status = read_record(folder / "status.json").get("status")
-            if status == "complete":
-                result.append((label, f"[{label}] 已完成并评分"))
+            if status in {"complete", "complete_with_warnings"}:
+                result.append((label, f"[{label}] " + ("已完成并评分" if status == "complete" else "流程结束，含技术失败计零或记忆维护缺口")))
                 continue
             parts = []
+            amem = folder / "memory/amem_progress.json"
+            if amem.is_file():
+                info = read_record(amem)
+                parts.append(f"输入处理 {info.get('processed_messages', 0)}/{manifest.get('messages', '?')}；"
+                             f"A-MEM 笔记 {info.get('memories', 0)}；演化 {info.get('evolution_count', 0)}；"
+                             f"回退警告 {info.get('warnings', 0)}")
             for database in sorted((folder / "memory").glob("*.sqlite")):
                 try:
                     with closing(readonly_database(database)) as db:
@@ -80,6 +89,9 @@ class ExperimentProgress:
                         memories = db.execute("SELECT count(*) FROM versions").fetchone()[0]
                         total = manifest.get("messages", "?")
                         parts.append(f"输入处理 {done}/{total}；记忆版本 {memories}（含历史）")
+                        scopes = sum(len(json.loads(row[0]).get("pending_scopes", []))
+                                     for row in db.execute("SELECT payload FROM progress"))
+                        parts.append(f"待处理范围 {scopes}")
                         batch = ingest.get("pending_batch")
                         if batch:
                             row = db.execute("SELECT payload FROM progress WHERE key=?", ("batch:" + batch["id"],)).fetchone()
@@ -95,7 +107,8 @@ class ExperimentProgress:
                 name, count = phase["name"], len(phase["question_ids"])
                 answered = sum(1 for _ in (folder / name / "answers").glob("*.json"))
                 scored = sum(1 for _ in (folder / name / "scores").glob("*.json"))
-                parts.append(f"{name} 回答文件 {answered}/{count}" + (f"，评分文件 {scored}/{count}" if scored else ""))
+                failed = sum(1 for _ in (folder / name / "failures").glob("*.json"))
+                parts.append(f"{name} 回答文件 {answered}/{count}；技术失败题 {failed}" + (f"，评分文件 {scored}/{count}" if scored else ""))
             if (folder / "official_judge.json").is_file():
                 parts.append("已生成官方评判文件，完成状态以校验为准")
             if status == "incomplete":
@@ -195,7 +208,7 @@ class ExperimentProgress:
         except (sqlite3.Error, ValueError, TypeError):
             header += "；请求账本暂不可读"
         result = [header]
-        rows = self._ourmem() if config.get("baseline") == "ourmem" else self._baselines(config, manifest.get("protocol", {}))
+        rows = self._ourmem() if config.get("baseline") in {"ourmem", "amem"} else self._baselines(config, manifest.get("protocol", {}))
         for key, line in rows:
             if self.previous.get(key) != line:
                 result.append(line)

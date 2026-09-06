@@ -50,6 +50,47 @@ def answer_question(config, sample, question, retrieval, client):
     return record
 
 
+def grade_question(runtime, sample, phase, question, snapshot_id, client, scorer):
+    """一次只隔离当前题的模型故障；损坏产物、预算和程序错误仍向上传播。"""
+    from .protocol import checked, question_file, digest
+    from .search import validate_retrieval
+    from .question_outcomes import read_failure, save_failure, failure_result, stored_failure_result
+    from ..evaluation.official import validate_answers, validate_scores
+    from ..inference_utils.model_client import RecoverableModelError
+    from ..utils.benchmark_files import write_json
+    cfg, folder = runtime.config, runtime.directory(sample) / phase.name
+    failure = read_failure(runtime, sample, phase, question, snapshot_id)
+    if failure is not None:
+        return stored_failure_result(runtime, sample, phase, question, failure)
+    identity = {"question_id": question.id, "question": question.text, "snapshot_id": snapshot_id}
+    retrieval = checked(question_file(folder / "retrievals", question.id), identity, "检索结果")
+    validate_retrieval(retrieval)
+    path = question_file(folder / "answers", question.id)
+    if path.exists():
+        record = checked(path, {**identity, "retrieval_sha256": digest(retrieval)}, "回答")
+        validate_answers([record], (question,))
+    else:
+        try:
+            record = answer_question(cfg, sample, question, retrieval, client)
+        except RecoverableModelError as error:
+            return failure_result(save_failure(runtime, sample, phase, question, snapshot_id, "answer", error, payload=retrieval))
+        write_json(path, record)
+    path = question_file(folder / "scores", question.id)
+    identity = {"answer_sha256": digest(record), "judge_model": cfg.judge_model}
+    if path.exists():
+        score = checked(path, identity, "评分")
+    else:
+        try:
+            scores = runtime.dataset_cls.evaluate([question.as_pair()], [record["answer_text"]],
+                                                 protocol="official", official_scorer=scorer)[0]
+        except RecoverableModelError as error:
+            return failure_result(save_failure(runtime, sample, phase, question, snapshot_id, "judge", error, payload=record), record)
+        score = {**identity, "scores": scores}
+    validate_scores(cfg.benchmark, score["scores"], locomo_judge=cfg.locomo_judge)
+    write_json(path, score)
+    return {**record, "scores": score["scores"], "score_origin": "official"}
+
+
 def evaluate_memory(
     retrievals: list[dict[str, Any]],
     qa_model: str,
@@ -445,19 +486,18 @@ class EvaluationRunner:
         self.runtime = runtime
 
     def _evaluate_sample(self, sample):
-        from .protocol import checked, question_file, digest
-        from .search import validate_retrieval, require_observation_answers
+        from .protocol import question_file, digest
+        from .search import require_observation_answers
         from ..datasets.online_base import OnlineMemBaseDataset
         from ..utils.benchmark_files import read_json, write_json, sha256_file
-        from ..evaluation.official import validate_answers, validate_scores
+        from ..evaluation.official import validate_answers
         runtime, cfg = self.runtime, self.runtime.config
         directory = runtime.prepare_sample(sample)
         runtime.require_stage(sample, "search")
-        checkpoint = runtime.checkpoint(sample)
         all_answers, phase_rows = [], {}
         # 评测本身不必加载记忆；只使用检索阶段已经保存的完整证据。
-        from ..ourmem.llm import ModelClient
-        client = ModelClient(runtime.memory_config, budget=runtime.client.budget, log_path=directory / "requests.jsonl") if runtime.owns_client else runtime.client
+        from ..inference_utils.model_client import ModelClient
+        client = ModelClient(runtime.call_config, budget=runtime.client.budget, log_path=directory / "requests.jsonl") if runtime.owns_client else runtime.client
         scorer = runtime.scorer(sample, client)
         try:
             for phase in sample.phases:
@@ -466,34 +506,16 @@ class EvaluationRunner:
                 if issubclass(runtime.dataset_cls, OnlineMemBaseDataset):
                     rows = require_observation_answers(runtime, sample, phase, snapshot_id)
                 else:
-                    rows = []
-                    for question in phase.questions:
-                        identity = {"question_id": question.id, "question": question.text, "snapshot_id": snapshot_id}
-                        retrieval = checked(question_file(folder / "retrievals", question.id), identity, "检索结果")
-                        validate_retrieval(retrieval)
-                        path = question_file(folder / "answers", question.id)
-                        if path.exists():
-                            record = checked(path, {**identity, "retrieval_sha256": digest(retrieval)}, "回答")
-                            validate_answers([record], (question,))
-                        else:
-                            record = answer_question(cfg, sample, question, retrieval, client)
-                            write_json(path, record)
-                        rows.append(record)
-                validate_answers(rows, phase.questions)
+                    rows = [grade_question(runtime, sample, phase, question, snapshot_id, client, scorer)
+                            for question in phase.questions]
+                validate_answers(rows, phase.questions, allow_failures=True)
                 write_json(folder / "answers.json", rows)
                 phase_rows[phase.name] = rows
                 if cfg.benchmark == "meme":
                     continue
-                for question, record in zip(phase.questions, rows):
-                    path = question_file(folder / "scores", question.id)
-                    identity = {"answer_sha256": digest(record), "judge_model": cfg.judge_model}
-                    score = checked(path, identity, "评分") if path.exists() else {
-                        **identity, "scores": runtime.dataset_cls.evaluate([question.as_pair()], [record["answer_text"]],
-                                                                          protocol="official", official_scorer=scorer)[0]}
-                    validate_scores(cfg.benchmark, score["scores"], locomo_judge=cfg.locomo_judge)
-                    write_json(path, score)
-                    all_answers.append({**record, "scores": score["scores"]})
-            output = {"sample": sample.key, "manifest": read_json(directory / "manifest.json"), "answers": all_answers}
+                all_answers.extend(rows)
+            output = {"sample": sample.key, "manifest": read_json(directory / "manifest.json"),
+                      "answers": all_answers, "locomo_judge_enabled": cfg.locomo_judge}
             if cfg.benchmark == "meme":
                 raw = sample.reference
                 official = {"episode_id": raw["episode_id"], "domain": raw["domain"], "root": raw.get("root", ""),
@@ -501,8 +523,9 @@ class EvaluationRunner:
                             "memory_snapshots": {f"{p.name}_questions": read_json(directory / p.name / "memory_snapshot.json")["text"] for p in sample.phases}}
                 for phase in sample.phases:
                     official[f"{phase.name}_answers"] = [
-                        {**question.reference, "agent_answer": row["answer_text"], "retrieved_context": row["context"],
-                         "read_audit": {k: row[k] for k in ("resolution_status", "reason", "coverage", "read_trace")}}
+                        {**question.reference, "agent_answer": row["answer_text"], "retrieved_context": row.get("context"),
+                         "read_audit": {k: row.get(k) for k in ("resolution_status", "reason", "coverage", "read_trace")},
+                         **({"technical_failure": row} if row.get("status") == "technical_failure" else {})}
                         for question, row in zip(phase.questions, phase_rows[phase.name])]
                 write_json(directory / "official_answers.json", official)
                 path, receipt = directory / "official_judge.json", directory / "judge_receipt.json"
@@ -515,11 +538,25 @@ class EvaluationRunner:
                     write_json(path, judged)
                     write_json(receipt, {**identity, "judge_sha256": sha256_file(path)})
                 from ..evaluation.meme import validate_judge
-                validate_judge(path, official, cfg.judge_model)
+                validate_judge(path, official, cfg.judge_model, allow_failures=True)
+                from .question_outcomes import save_failure
+                from ..inference_utils.model_client import RecoverableModelError
+                for phase in sample.phases:
+                    for question, row, judgment in zip(phase.questions, phase_rows[phase.name], judged[f"{phase.name}_answers"]):
+                        failure = judgment.get("technical_failure")
+                        if failure and row.get("status") != "technical_failure":
+                            payload = read_json(question_file(directory / phase.name / "answers", question.id))
+                            save_failure(runtime, sample, phase, question, runtime.require_snapshot(sample, phase), "judge",
+                                         RecoverableModelError(failure["reason"], request_ids=failure["request_ids"]), payload=payload)
                 output["judge"] = judged
+            output["memory_warnings"] = [phase.name for phase in sample.phases
+                                         if read_json(directory / phase.name / "memory_snapshot.json").get("maintenance_incomplete")]
             write_json(directory / "result.json", output)
             runtime.finish_stage(sample, "evaluation")
-            write_json(directory / "status.json", {"status": "complete"})
+            warnings = output["memory_warnings"] or any(row.get("status") == "technical_failure" for row in all_answers)
+            if cfg.benchmark == "meme":
+                warnings = warnings or any(row.get("technical_failure") for phase in sample.phases for row in judged[f"{phase.name}_answers"])
+            write_json(directory / "status.json", {"status": "complete_with_warnings" if warnings else "complete"})
             return output
         finally:
             if runtime.owns_client:

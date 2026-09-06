@@ -24,6 +24,7 @@ _LOCAL_FILES = (
     "memory_construction.py", "memory_search.py", "memory_evaluation.py",
     "membase/runners/construction.py", "membase/runners/search.py", "membase/runners/evaluation.py",
     "membase/runners/stage_cli.py", "membase/model_types/dataset.py", "membase/layers/base.py",
+    "membase/runners/question_outcomes.py",
     "membase/datasets/base.py", "membase/datasets/locomo.py", "membase/datasets/longmemeval.py",
     "membase/datasets/__init__.py", "membase/inference_utils/base_operator.py",
     "membase/inference_utils/operators.py", "membase/inference_utils/backends.py",
@@ -40,10 +41,22 @@ _OFFICIAL_FILES = {
 
 
 def ourmem_fingerprint(repo_root: Path = REPO_ROOT, *, official_roots: dict[str, Path] | None = None) -> dict:
+    return method_fingerprint("ourmem", repo_root, official_roots=official_roots)
+
+
+def method_fingerprint(method: str, repo_root: Path = REPO_ROOT, *, official_roots: dict[str, Path] | None = None) -> dict:
     """只读、纯标准库；验证脚本和正式运行器共享同一份指纹定义。"""
-    paths = {path.relative_to(repo_root).as_posix(): path
-             for path in (repo_root / "membase/ourmem").glob("*.py")}
-    paths.update({name: repo_root / name for name in _LOCAL_FILES})
+    if method not in {"ourmem", "amem"}:
+        raise ValueError(f"Unknown memory method: {method}")
+    specific = {"membase/configs/ourmem.py", "membase/layers/ourmem.py", "envs/ourmem_requirements.txt"}
+    common = set(_LOCAL_FILES) - specific
+    if method == "ourmem":
+        specific.update(path.relative_to(repo_root).as_posix() for path in (repo_root / "membase/ourmem").glob("*.py"))
+    else:
+        specific = {"membase/configs/amem.py", "membase/layers/amem.py", "envs/amem_mab_requirements.txt",
+                    "membase/baselines/amem/UPSTREAM.md"}
+        specific.update(path.relative_to(repo_root).as_posix() for path in (repo_root / "membase/baselines/amem").glob("*.py"))
+    paths = {name: repo_root / name for name in common | specific}
     for benchmark, upstream in (official_roots or {}).items():
         for name in _OFFICIAL_FILES[benchmark]:
             paths[f"official/{benchmark}/{name}"] = upstream / name

@@ -1,21 +1,20 @@
 from typing import List, Dict, Any, Optional, Union
-from sentence_transformers import SentenceTransformer
-from rank_bm25 import BM25Okapi
-import nltk
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 import chromadb
 from chromadb.config import Settings
 import pickle
-from nltk.tokenize import word_tokenize
 import os
 import json
+import threading
 from chromadb.utils.embedding_functions import (
     SentenceTransformerEmbeddingFunction,
     OpenAIEmbeddingFunction  
 )
 
+# Chroma 会先缓存共享实例、再完成启动；冷启动并发构造客户端会提前访问租户。
+_CLIENT_INIT_LOCK = threading.Lock()
+
 def simple_tokenize(text):
+    from nltk.tokenize import word_tokenize
     return word_tokenize(text)
 
 class ChromaRetriever:
@@ -26,7 +25,8 @@ class ChromaRetriever:
         model_name: str = "all-MiniLM-L6-v2",
         embedder_provider: str = "sentence-transformers", 
         api_key: Optional[str] = None,
-        base_url: Optional[str] = None
+        base_url: Optional[str] = None,
+        model_client=None,
     ):
         """Initialize ChromaDB retriever.
         Args:
@@ -37,10 +37,15 @@ class ChromaRetriever:
             base_url: Base URL for OpenAI API (optional, defaults to official OpenAI endpoint)
                      Useful for using proxies or OpenAI-compatible services
         """
-        self.client = chromadb.Client(Settings(allow_reset=True))
+        with _CLIENT_INIT_LOCK:
+            self.client = chromadb.Client(Settings(allow_reset=False, anonymized_telemetry=False))
         self.embedder_provider = embedder_provider
+        self.model_client = model_client
+        self.operation_stage = "amem_build_embedding"
 
-        if embedder_provider == "openai":
+        if model_client is not None:
+            self.embedding_function = None  # 显式传向量，避免 Chroma 另开未计费的 SDK 客户端。
+        elif embedder_provider == "openai":
             api_key = api_key or os.environ.get("OPENAI_API_KEY")
             base_url = base_url or os.getenv('OPENAI_API_BASE')
             if api_key is None:
@@ -103,10 +108,17 @@ class ChromaRetriever:
         processed_metadata['enhanced_content'] = enhanced_document
                 
         # Use enhanced document content for embedding generation
-        self.collection.add(
+        existing = self.collection.get(ids=[doc_id], include=["documents", "metadatas"])
+        if existing["ids"] and existing["documents"][0] == enhanced_document:
+            if existing["metadatas"][0] != processed_metadata:
+                self.collection.update(ids=[doc_id], metadatas=[processed_metadata])
+            return
+        embedding = ({"embeddings": self.model_client.embed([enhanced_document], stage=self.operation_stage)}
+                     if self.model_client is not None else {})
+        self.collection.upsert(
             documents=[enhanced_document],
             metadatas=[processed_metadata],
-            ids=[doc_id]
+            ids=[doc_id], **embedding,
         )
         
     def delete_document(self, doc_id: str):
@@ -127,8 +139,10 @@ class ChromaRetriever:
         Returns:
             Dict with documents, metadatas, ids, and distances
         """
+        inputs = ({"query_embeddings": self.model_client.embed([query], stage=self.operation_stage)}
+                  if self.model_client is not None else {"query_texts": [query]})
         results = self.collection.query(
-            query_texts=[query],
+            **inputs,
             n_results=k
         )
         

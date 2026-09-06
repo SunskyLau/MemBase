@@ -17,7 +17,7 @@ def judge_name(episode: dict, baseline: str, model: str, judge_model: str) -> st
     return f"eval_{episode_key(episode)}_{baseline}_{model.replace('/', '-')}_{judge_model.replace('/', '-')}.json"
 
 
-def validate_questions(records: list[dict], questions: list[dict], label: str) -> None:
+def validate_questions(records: list[dict], questions: list[dict], label: str, *, allow_failures=False) -> None:
     actual = Counter(question_key(q) for q in records)
     expected = Counter(question_key(q) for q in questions)
     if actual != expected:
@@ -25,6 +25,11 @@ def validate_questions(records: list[dict], questions: list[dict], label: str) -
         extra = [key[1] for key in (actual - expected)]
         raise ValueError(f"{label} 问题不完整：缺失 {missing[:5]}；多余/重复 {extra[:5]}")
     for record in records:
+        if allow_failures and record.get("technical_failure"):
+            failure = record["technical_failure"]
+            if not isinstance(failure.get("reason"), str) or not isinstance(failure.get("request_ids"), list):
+                raise ValueError(f"{label} 技术失败缺少审计记录")
+            continue
         if not isinstance(record.get("agent_answer"), str) or not record["agent_answer"].strip():
             raise ValueError(f"{label} 缺少模型回答")
 
@@ -47,7 +52,7 @@ def validate_answer(path: Path, episode: dict, baseline: str, model: str,
     return output
 
 
-def validate_judge(path: Path, answer: dict, judge_model: str) -> dict:
+def validate_judge(path: Path, answer: dict, judge_model: str, *, allow_failures=False) -> dict:
     result = read_json(path)
     if result["episode_id"] != answer["episode_id"] or result["agent_config"] != answer["config"]:
         raise ValueError(f"MEME 评分身份或配置不匹配：{path}")
@@ -55,13 +60,15 @@ def validate_judge(path: Path, answer: dict, judge_model: str) -> dict:
         raise ValueError(f"MEME 评判模型不匹配：{path}")
     for phase in ("before", "after"):
         rows = result[f"{phase}_answers"]
-        validate_questions(rows, answer[f"{phase}_answers"], f"{path.name}/{phase}")
+        validate_questions(rows, answer[f"{phase}_answers"], f"{path.name}/{phase}", allow_failures=allow_failures)
         original = {question_key(q): q["agent_answer"] for q in answer[f"{phase}_answers"]}
         for row in rows:
             if row["agent_answer"] != original[question_key(row)] or type(row.get("u_pass")) is not bool:
                 raise ValueError(f"MEME 评分不是当前回答的完整结果：{path}")
             if row.get("u_reason") == "missing":
                 raise ValueError(f"MEME 评分缺失：{path}")
+            if allow_failures and row.get("technical_failure") and row["u_pass"] is not False:
+                raise ValueError("技术失败不能成为正确回答")
     # 与官方 judge_episode 的前后状态过滤保持一致。
     before = {next(iter(q["entity_values"])): q["u_pass"] for q in result["before_answers"]}
     for row in result["after_answers"]:

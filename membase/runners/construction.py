@@ -52,7 +52,7 @@ def memory_construction(
     traced_data_save_dir: str | None = None,
     dataset_cls: type[MemoryDataset] | None = None,
     online_eval_env: OnlineEvalEnv | None = None,
-    *, layer=None, start_session: int = 0, on_session=None,
+    *, layer=None, start_session: int = 0, on_session=None, start_message: int = 0, on_message=None,
     skip_existing: bool = True, cleanup: bool = True, iteration_delay: float = 0.2,
 ) -> dict[str, float | list[OnlineEvalResult]]: 
     """Given a specific interaction trajectory, build a memory for one user.
@@ -151,8 +151,10 @@ def memory_construction(
 
             num_add_failed = 0
             num_eval_failed = 0
+            message_index = 0
             for i, session in enumerate(trajectory, start=1):
                 if i <= start_session:
+                    message_index += len(session)
                     pbar.update(len(session))
                     continue
                 with comment_session(
@@ -162,6 +164,10 @@ def memory_construction(
                     metadata=session.metadata,
                 ):
                     for message in session:
+                        message_index += 1
+                        if message_index <= start_message:
+                            pbar.update(1)
+                            continue
                         start_time = datetime.now() 
                         message = message.model_copy(deep=True)
                         message = message_preprocessor(message)
@@ -194,6 +200,8 @@ def memory_construction(
                                     message,
                                     session_id=session.id,
                                 )
+                            if on_message is not None:
+                                on_message(message_index, layer)
                         except Exception as e:
                             if strict:
                                 pbar.close()
@@ -416,6 +424,16 @@ class ConstructionRunner:
         if checkpoint["sessions_ingested"] > target_end:
             raise ValueError("检查点已经摄入本次观察范围之外的未来信息")
         with runtime.sample_scope(sample) as (layer, client):
+            is_amem = runtime.config.baseline == "amem"
+            loaded = layer.load_memory(sample.namespace) if is_amem else False
+            start_message = layer.processed_messages if is_amem else 0
+            expected_messages = sum(len(s) for s in sample.sessions[:target_end])
+            if start_message > expected_messages:
+                raise ValueError("A-MEM checkpoint exceeds selected input")
+
+            def finish_message(index, current_layer):
+                if index % current_layer.config.checkpoint_interval == 0:
+                    current_layer.save_memory()
             def observe(phase, snapshot_id):
                 if checkpoint["sessions_ingested"] > phase.session_end:
                     require_observation_answers(runtime, sample, phase, snapshot_id)
@@ -441,7 +459,7 @@ class ConstructionRunner:
                             observe(phase, snapshot_id)
 
             if checkpoint["sessions_ingested"] or (directory / "construction.json").exists():
-                if not layer.load_memory(sample.namespace):
+                if not loaded and not layer.load_memory(sample.namespace):
                     raise ValueError("Checkpoint exists but its memory is missing")
                 if issubclass(runtime.dataset_cls, OnlineMemBaseDataset):
                     for phase in sample.phases:
@@ -451,10 +469,14 @@ class ConstructionRunner:
                             observe(phase, runtime.require_snapshot(sample, phase))
             if (directory / "construction.json").exists():
                 runtime.require_stage(sample, "construction")
+                if is_amem and start_message != expected_messages:
+                    raise ValueError("A-MEM construction receipt disagrees with saved input progress")
                 if checkpoint["sessions_ingested"] != target_end:
                     raise ValueError("Construction receipt disagrees with the input checkpoint")
                 for phase in sample.phases:
-                    runtime.require_snapshot(sample, phase)
+                    snapshot_id = runtime.require_snapshot(sample, phase)
+                    if is_amem:
+                        layer.get_memory_snapshot(snapshot_id)
                 return {"reused": True}
             layer.add_messages([], input_policy=sample.input_policy)
             if checkpoint["sessions_ingested"] == 0 and any(p.session_end == 0 for p in sample.phases):
@@ -462,9 +484,10 @@ class ConstructionRunner:
             if target_end:
                 trajectory = sample.as_trajectory()
                 trajectory = trajectory.model_copy(update={"sessions": trajectory.sessions[:target_end]})
-                memory_construction("OurMem", sample.namespace, trajectory,
+                memory_construction(runtime.layer_name, sample.namespace, trajectory,
                                     config=runtime.memory_config.model_dump(mode="python"), layer=layer,
                                     start_session=checkpoint["sessions_ingested"], on_session=finish_session,
+                                    start_message=start_message, on_message=finish_message if is_amem else None,
                                     skip_existing=False, cleanup=False, iteration_delay=0, dataset_cls=runtime.dataset_cls)
             runtime.finish_stage(sample, "construction")
             return {"sessions": checkpoint["sessions_ingested"]}

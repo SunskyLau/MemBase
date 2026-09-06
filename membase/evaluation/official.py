@@ -92,6 +92,7 @@ class Scorer:
     def _json(self, prompt: str, expected_items: int | None = None) -> dict:
         key = hashlib.sha256((self.judge_model + "\n" + prompt).encode()).hexdigest()
         path = self.cache_dir / f"{key}.json"
+        failure_path = self.cache_dir / f"{key}.failure.json"
         def validate(value):
             if not isinstance(value, dict):
                 raise ValueError("官方评判必须返回 JSON 对象")
@@ -108,8 +109,15 @@ class Scorer:
 
         if path.exists():
             return validate(read_json(path))
-
-        value = self.client.request_json("judge", prompt, None, validator=validate, model=self.judge_model)
+        from ..inference_utils.model_client import RecoverableModelError, failure_details
+        if failure_path.exists():
+            failure = read_json(failure_path)
+            raise RecoverableModelError(failure["reason"], request_ids=failure["request_ids"])
+        try:
+            value = self.client.request_json("judge", prompt, None, validator=validate, model=self.judge_model)
+        except RecoverableModelError as error:
+            write_json(failure_path, failure_details(error))
+            raise
         write_json(path, value)
         return value
 
@@ -140,6 +148,22 @@ class Scorer:
         official = official_module(self.upstream / "code/eval/judge.py")
         owner = self
         from threading import local
+        from ..inference_utils.model_client import RecoverableModelError, failure_details
+        blocked = {}
+        for phase in ("before", "after"):
+            for row in output[f"{phase}_answers"]:
+                if not row.get("technical_failure"):
+                    continue
+                ev = row["entity_values"]
+                entity = next(iter(ev))
+                key = (("multi", phase, row["question"], json.dumps(ev, sort_keys=True))
+                       if phase == "after" and row["task_type"].split(" (")[0] == "Agg"
+                       else ("single", phase, row["question"], entity, ev[entity]))
+                blocked[key] = row["technical_failure"]
+
+        def failed_check(details):
+            return {"u_pass": False, "u_reason": "technical_failure_assigned_zero",
+                    "official_u_pass": None, "score_origin": "technical_failure", "technical_failure": details}
 
         class SharedJudge(official.LLMJudge):
             context = local()
@@ -147,10 +171,24 @@ class Scorer:
             def _call(self, prompt):
                 return owner._json(prompt, getattr(self.context, "expected_items", None))
 
+            def u_check(self, question, entity, gold_value, agent_answer, task_type, phase="after"):
+                key = ("single", phase, question, entity, gold_value)
+                if key in blocked:
+                    return failed_check(blocked[key])
+                try:
+                    return super().u_check(question, entity, gold_value, agent_answer, task_type, phase)
+                except RecoverableModelError as error:
+                    return failed_check(failure_details(error))
+
             def u_check_multi(self, question, entity_values, agent_answer, phase="after"):
+                key = ("multi", phase, question, json.dumps(entity_values, sort_keys=True))
+                if key in blocked:
+                    return failed_check(blocked[key])
                 self.context.expected_items = len(entity_values)
                 try:
                     return super().u_check_multi(question, entity_values, agent_answer, phase)
+                except RecoverableModelError as error:
+                    return failed_check(failure_details(error))
                 finally:
                     self.context.expected_items = None
 
@@ -161,7 +199,7 @@ class Scorer:
         return result
 
 
-def validate_answers(records: list[dict], questions: tuple[Question, ...], *, complete: bool = True) -> None:
+def validate_answers(records: list[dict], questions: tuple[Question, ...], *, complete: bool = True, allow_failures: bool = False) -> None:
     expected = {q.id: q for q in questions}
     actual = [row.get("question_id") for row in records]
     if len(set(actual)) != len(actual) or set(actual) - set(expected):
@@ -171,9 +209,13 @@ def validate_answers(records: list[dict], questions: tuple[Question, ...], *, co
     for row in records:
         if row.get("question") != expected[row["question_id"]].text:
             raise ValueError("回答问题与输入不一致")
+        if allow_failures and row.get("status") == "technical_failure":
+            from ..runners.question_outcomes import validate_failure
+            validate_failure(row)
+            continue
         if not isinstance(row.get("answer_text"), str) or not row["answer_text"].strip():
             raise ValueError("缺少有效回答文本")
-        if row.get("resolution_status") not in {"resolved", "unknown", "conflict", "deleted", "incomplete"}:
+        if row.get("resolution_status") not in {"resolved", "unknown", "conflict", "deleted", "incomplete", "not_assessed"}:
             raise ValueError("回答缺少处理状态")
 
 
@@ -197,13 +239,26 @@ def validate_scores(benchmark: str, scores: dict, *, locomo_judge: bool = False)
 
 
 def summarize(benchmark: str, episodes: list[tuple[Episode, dict]]) -> dict:
+    from collections import Counter
+    expected = sum(len(p.questions) for ep, _ in episodes for p in ep.phases)
+    warning_samples = sum(bool(out.get("memory_warnings")) for _, out in episodes)
     if benchmark == "meme":
         from .meme import summarize as official_summary
-        return official_summary([(ep.reference["domain"], result["judge"]) for ep, result in episodes])
+        result = official_summary([(ep.reference["domain"], output["judge"]) for ep, output in episodes])
+        rows = [row for _, out in episodes for phase in ("before", "after") for row in out["judge"][f"{phase}_answers"]]
+        failures = Counter(row["technical_failure"].get("failed_stage", "judge") for row in rows if row.get("technical_failure"))
+        # 原生 before/ER 不调用评判，不把它计成一次实际评分。
+        scored = sum(not row.get("technical_failure") and row.get("u_reason") != "skipped (ER)" for row in rows)
+        result.update(expected_questions=expected, answered_questions=sum(bool(row.get("agent_answer")) for row in rows),
+                      scored_questions=scored, technical_failures_by_stage=dict(failures),
+                      technical_failure_questions=sum(failures.values()), memory_warning_samples=warning_samples,
+                      scoring_policy="official_task_rules_with_technical_failures_assigned_zero")
+        return result
     groups = {}
     metric = {"locomo": "official_f1", "longmemeval": "official_accuracy",
               "memoryagentbench": "substring_exact_match"}[benchmark]
-    statuses = {}
+    statuses, failures = {}, Counter()
+    answered = scored = 0
     for ep, output in episodes:
         refs = {q.id: q for p in ep.phases for q in p.questions}
         for row in output["answers"]:
@@ -211,20 +266,35 @@ def summarize(benchmark: str, episodes: list[tuple[Episode, dict]]) -> dict:
             group = str(ref["category"]) if benchmark == "locomo" else (
                 ref["question_type"] if benchmark == "longmemeval" else ref["source"])
             values = groups.setdefault(group, [])
-            values.append(float(row["scores"][metric]))
+            answered += bool(row.get("answer_text"))
+            if row.get("status") == "technical_failure":
+                from ..runners.question_outcomes import validate_failure
+                validate_failure(row)
+                values.append(0.0)
+                failures[row["failed_stage"]] += 1
+            else:
+                values.append(float(row["scores"][metric]))
+                scored += 1
             status = row["resolution_status"]
             statuses[status] = statuses.get(status, 0) + 1
     values = [v for group in groups.values() for v in group]
     if not values:
         raise ValueError("没有可汇总的完整回答")
+    if len(values) != expected:
+        raise ValueError("存在未处理问题，不能用缩小的分母汇总")
     result = {"metric": metric, "episodes": len(episodes), "questions": len(values),
               "score": sum(values) / len(values), "by_group": {
                   name: {"questions": len(v), "score": sum(v) / len(v)} for name, v in groups.items()},
-              "resolution_status_counts": statuses}
-    if benchmark == "locomo":
-        additional = [float(row["scores"]["additional_judge"]["correct"])
+              "resolution_status_counts": statuses, "expected_questions": expected,
+              "answered_questions": answered, "scored_questions": scored,
+              "technical_failures_by_stage": dict(failures), "technical_failure_questions": sum(failures.values()),
+              "memory_warning_samples": warning_samples,
+              "scoring_policy": "official_metric_with_technical_failures_assigned_zero"}
+    if benchmark == "locomo" and any(out.get("locomo_judge_enabled") or
+            any("additional_judge" in (row.get("scores") or {}) for row in out["answers"]) for _, out in episodes):
+        additional = [float(row["scores"]["additional_judge"]["correct"]) if row.get("status") != "technical_failure" else 0.0
                       for _, output in episodes for row in output["answers"]
-                      if "additional_judge" in row["scores"]]
+                      if row.get("status") == "technical_failure" or "additional_judge" in row["scores"]]
         if additional:
             result["additional_judge_accuracy"] = sum(additional) / len(additional)
     return result

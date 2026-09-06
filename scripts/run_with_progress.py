@@ -121,7 +121,7 @@ def supervise(command: list[str], run_dir: Path, interval: float) -> int:
         process.stdout.close()
     if interrupted and (run_dir / "config.json").is_file():
         from membase.utils.benchmark_files import write_json
-        if read_record(run_dir / "status.json").get("status") != "complete":
+        if read_record(run_dir / "status.json").get("status") not in {"complete", "complete_with_warnings"}:
             write_json(run_dir / "status.json", {"status": "incomplete", "error_type": "KeyboardInterrupt"})
     refresh()
     console.write(f"[退出] 返回码 {code}；本次耗时 {duration(time.monotonic() - started)}\n")

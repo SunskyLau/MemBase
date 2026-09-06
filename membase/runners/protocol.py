@@ -15,9 +15,9 @@ from ..datasets.official import episode_manifest, fingerprint
 from ..evaluation.official import Scorer, summarize, summarize_run_costs
 from ..utils.benchmark_files import read_json, write_json, sha256_file
 from ..utils.experiment import start_run, fail_run, finish_run
-from ..utils.ourmem_version import ImplementationMismatchError, ourmem_fingerprint
+from ..utils.ourmem_version import ImplementationMismatchError, ourmem_fingerprint, method_fingerprint
 
-PROTOCOL_VERSION = "membase-three-stage-v1"
+PROTOCOL_VERSION = "membase-three-stage-v3"
 DATASET_NAMES = {"locomo": "LoCoMo", "longmemeval": "LongMemEval", "memoryagentbench": "MemoryAgentBench", "meme": "MEME"}
 
 
@@ -33,8 +33,10 @@ class OfficialRunConfig(BenchmarkRunConfig):
 
     def saved_config(self):
         values = super().saved_config()
-        for key in ("top_k", "parallel_jobs", "judge_workers"):
+        for key in ("parallel_jobs", "judge_workers"):
             values.pop(key)
+        if self.baseline == "ourmem":
+            values.pop("top_k")
         values["temperature"] = self.temperature if self.benchmark == "memoryagentbench" else 0
         return values
 
@@ -69,7 +71,10 @@ def preview(config, stages=("construction", "search", "evaluation")):
     overrides = read_json(config.memory_config) if config.memory_config else {}
     result = {"dry_run": True, "config": config.saved_config(), "matrix": matrix,
               "stages": list(stages), "protocol": PROTOCOL_VERSION,
-              "memory": {"storage": "independent SQLite per sample", "max_claim_depth": overrides.get("max_claim_depth", 5)},
+              "memory": ({"storage": "independent SQLite per sample", "max_claim_depth": overrides.get("max_claim_depth", 5)}
+                         if config.baseline == "ourmem" else {"storage": "isolated Chroma + atomic state checkpoint",
+                             "checkpoint_interval": overrides.get("checkpoint_interval", 8), "evo_threshold": overrides.get("evo_threshold", 100),
+                             "top_k": config.top_k, "max_evidence_tokens": overrides.get("max_evidence_tokens", 8000)}),
               "scoring": "pinned official protocol"}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
@@ -78,11 +83,19 @@ def preview(config, stages=("construction", "search", "evaluation")):
 class RunContext:
     def __init__(self, config, *, client=None, layer_factory=None):
         self.config, self.layer_factory = config, layer_factory
+        self.layer_name = {"ourmem": "OurMem", "amem": "A-MEM"}[config.baseline]
+        if config.baseline == "amem" and config.benchmark != "memoryagentbench":
+            raise ValueError("A-MEM official three-stage adapter currently supports MAB only")
+        self.blocked_samples = set()
+        self.stage_failures = []
+        self.stop_requested = False
         protocol = {**fingerprint(config.benchmark, config.data_root, config.upstream_dir),
                     "workflow": PROTOCOL_VERSION,
-                    "implementation": ourmem_fingerprint(official_roots={config.benchmark: config.upstream_dir})}
+                    "implementation": (ourmem_fingerprint(official_roots={config.benchmark: config.upstream_dir})
+                                       if config.baseline == "ourmem" else method_fingerprint("amem", official_roots={config.benchmark: config.upstream_dir}))}
         self.overrides = read_json(config.memory_config) if config.memory_config else {}
-        if set(self.overrides) & {"api_key", "api_keys", "base_url", "base_urls"}:
+        if set(self.overrides) & {"api_key", "api_keys", "base_url", "base_urls", "llm_api_key", "embedding_api_key",
+                                 "llm_base_url", "embedding_base_url"}:
             raise ValueError("方法配置不得包含接口凭据")
         protocol["memory_overrides"] = self.overrides
         path = config.run_dir / "config.json"
@@ -97,17 +110,29 @@ class RunContext:
                 raise ImplementationMismatchError("RUN_ID 对应的配置不同，请使用新的 RUN_ID；旧产物不变")
         from ..datasets import DATASET_MAPPING
         from ..configs import CONFIG_MAPPING
-        from ..ourmem.llm import ModelClient, RequestBudget
+        from ..inference_utils.model_client import ModelClient, ModelClientConfig, RequestBudget
         self.dataset_cls = DATASET_MAPPING[DATASET_NAMES[config.benchmark]]
-        self.memory_config = CONFIG_MAPPING["OurMem"](**{
-            **self.overrides, "model_name": config.internal_model, "answer_model": config.answer_model,
-            "judge_model": config.judge_model, "seed": config.seed,
-            "embedding_model_name": config.embedding_model, "api_key": os.environ.get("OPENAI_API_KEY", ""), "base_url": config.base_url})
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        self.call_config = ModelClientConfig(model_name=config.internal_model, answer_model=config.answer_model,
+                                             judge_model=config.judge_model, seed=config.seed,
+                                             embedding_model_name=config.embedding_model, api_key=api_key, base_url=config.base_url)
+        if config.baseline == "ourmem":
+            self.memory_config = CONFIG_MAPPING["OurMem"](**{
+                **self.overrides, "model_name": config.internal_model, "answer_model": config.answer_model,
+                "judge_model": config.judge_model, "seed": config.seed,
+                "embedding_model_name": config.embedding_model, "api_key": api_key, "base_url": config.base_url})
+            self.call_config = self.memory_config
+        else:
+            self.memory_config = CONFIG_MAPPING["A-MEM"](**{
+                **self.overrides, "user_id": "default", "llm_backend": "openai", "llm_model": config.internal_model,
+                "llm_api_key": api_key, "llm_base_url": config.base_url, "embedding_provider": "openai",
+                "retriever_name_or_path": config.embedding_model, "embedding_api_key": api_key,
+                "embedding_base_url": config.base_url, "preserve_unknown_time": True})
         self.owns_client = client is None
-        if self.owns_client and not self.memory_config.api_key:
+        if self.owns_client and not self.call_config.api_key:
             raise ValueError("请提供 OPENAI_API_KEY")
         start_run(config.run_dir, config.saved_config(), protocol)
-        self.client = client or ModelClient(self.memory_config, budget=RequestBudget(
+        self.client = client or ModelClient(self.call_config, budget=RequestBudget(
             config.max_llm_requests, config.max_embedding_requests, config.budget_ledger or config.run_dir / "budget.sqlite"),
             log_path=config.run_dir / "requests.jsonl")
 
@@ -129,11 +154,11 @@ class RunContext:
     @contextmanager
     def sample_scope(self, sample, *, load=False):
         from ..layers import MEMORY_LAYERS_MAPPING
-        from ..ourmem.llm import ModelClient
+        from ..inference_utils.model_client import ModelClient
         directory = self.prepare_sample(sample)
-        client = ModelClient(self.memory_config, budget=self.client.budget, log_path=directory / "requests.jsonl") if self.owns_client else self.client
+        client = ModelClient(self.call_config, budget=self.client.budget, log_path=directory / "requests.jsonl") if self.owns_client else self.client
         config = self.memory_config.model_copy(update={"user_id": sample.namespace, "save_dir": str(directory / "memory")})
-        factory = self.layer_factory or MEMORY_LAYERS_MAPPING["OurMem"].from_config
+        factory = self.layer_factory or MEMORY_LAYERS_MAPPING[self.layer_name].from_config
         layer = factory(config, client=client)
         try:
             if load and not layer.load_memory(sample.namespace):
@@ -166,9 +191,10 @@ class RunContext:
         write_json(self.directory(sample) / f"{stage}.json", {"complete": True, "manifest": episode_manifest(sample)})
 
     def execute(self, stage, worker):
-        from ..ourmem.llm import BudgetExceeded
+        from ..inference_utils.model_client import BudgetExceeded
+        from openai import APIStatusError
         write_json(self.config.run_dir / "status.json", {"status": "running", "stage": stage})
-        completed, failures, count, exhausted = [], [], 0, False
+        completed, exhausted = [], False
         iterator = iter(self.samples())
         with ThreadPoolExecutor(max_workers=self.config.workers) as pool:
             pending = {}
@@ -177,10 +203,11 @@ class RunContext:
                     sample = next(iterator, None)
                     if sample is None:
                         exhausted = True
+                    elif sample.key in self.blocked_samples:
+                        continue
                     else:
                         print(f"[{sample.key}] {stage} 开始/续跑", flush=True)
                         pending[pool.submit(self.process_sample, stage, worker, sample)] = sample
-                        count += 1
                 if not pending:
                     break
                 done, _ = wait(pending, return_when=FIRST_COMPLETED)
@@ -191,22 +218,62 @@ class RunContext:
                         completed.append((replace(sample, sessions=(), reference={"domain": sample.reference.get("domain")}, source_mapping={}), result))
                         print(f"[{sample.key}] {stage} 完成", flush=True)
                     except Exception as error:
-                        failures.append({"sample": sample.key, "stage": stage, "error_type": type(error).__name__})
-                        if isinstance(error, BudgetExceeded):
+                        self.blocked_samples.add(sample.key)
+                        detail = str(error)
+                        if os.environ.get("OPENAI_API_KEY"):
+                            detail = detail.replace(os.environ["OPENAI_API_KEY"], "[REDACTED]")
+                        self.stage_failures.append({"sample": sample.key, "stage": stage,
+                                                    "error_type": type(error).__name__, "reason": detail})
+                        print(f"[{sample.key}] {stage} 未完成：{detail}", flush=True)
+                        if isinstance(error, (BudgetExceeded, APIStatusError, OSError, ImportError)):
                             exhausted = True
-                            write_json(self.config.run_dir / "budget_stop.json", {"status": "stopped", "reason": "request_budget_exhausted"})
-        if failures or len(completed) != count:
-            write_json(self.config.run_dir / "failures.json", failures)
-            raise RuntimeError(f"{stage} 阶段有 {len(failures)} 个样本未完成")
-        if not completed:
+                            self.stop_requested = True
+                            if isinstance(error, BudgetExceeded):
+                                write_json(self.config.run_dir / "budget_stop.json", {"status": "stopped", "reason": "request_budget_exhausted"})
+        if self.stage_failures:
+            write_json(self.config.run_dir / "failures.json", self.stage_failures)
+        if not completed and not self.stage_failures:
             raise ValueError("没有选中任何样本")
-        if stage == "evaluation":
+        if stage == "evaluation" and not self.stage_failures:
             result = summarize(self.config.benchmark, completed)
             result.update(selected_mode=self.config.mode, request_costs=self.costs())
             finish_run(self.config.run_dir, result)
             return result
-        write_json(self.config.run_dir / "status.json", {"status": "stage_complete", "completed_stage": stage})
+        write_json(self.config.run_dir / "status.json", {"status": "stage_incomplete" if self.stage_failures else "stage_complete",
+                                                         "completed_stage": stage})
         return completed
+
+    def record_incomplete(self):
+        """只列覆盖情况，不把未完成样本排除后计算貌似完整的成绩。"""
+        coverage = []
+        for sample in self.samples():
+            for phase in sample.phases:
+                folder = self.directory(sample) / phase.name
+                # 缺项清单是文件级进度；完整成绩仍须通过正式校验。
+                answered, failed, unprocessed, missing_retrievals, missing_scores = [], [], [], [], []
+                for question in phase.questions:
+                    if question_file(folder / "failures", question.id).is_file():
+                        failed.append(question.id)
+                        continue
+                    if question_file(folder / "answers", question.id).is_file():
+                        answered.append(question.id)
+                    else:
+                        unprocessed.append(question.id)
+                    if not question_file(folder / "retrievals", question.id).is_file():
+                        missing_retrievals.append(question.id)
+                    score_exists = ((self.directory(sample) / "official_judge.json").is_file() if self.config.benchmark == "meme"
+                                    else question_file(folder / "scores", question.id).is_file())
+                    if not score_exists:
+                        missing_scores.append(question.id)
+                coverage.append({"sample": sample.key, "phase": phase.name,
+                                 "expected_question_ids": [q.id for q in phase.questions],
+                                 "answer_artifacts": answered, "failure_artifacts": failed,
+                                 "missing_answer_ids": unprocessed,
+                                 "missing_retrieval_ids": missing_retrievals,
+                                 "missing_score_ids": missing_scores,
+                                 "evaluation_complete": (self.directory(sample) / "evaluation.json").is_file()})
+        write_json(self.config.run_dir / "partial_summary.json", {"status": "incomplete", "score": None,
+                                                                  "coverage": coverage, "failures": self.stage_failures})
 
     def process_sample(self, stage, worker, sample):
         try:
@@ -238,8 +305,13 @@ def run(config, *, stages=("construction", "search", "evaluation"), client=None,
         result = None
         for stage in stages:
             result = runners[stage](None, runtime=context).run()
+            if context.stop_requested:
+                break
+        if context.stage_failures:
+            raise RuntimeError(f"实验仍有 {len(context.blocked_samples)} 个样本未完成；详见 failures.json 和 partial_summary.json")
         return result
     except BaseException as error:
+        context.record_incomplete()
         fail_run(config.run_dir, error)
         raise
     finally:

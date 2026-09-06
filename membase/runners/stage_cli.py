@@ -42,9 +42,9 @@ def official_stage(stage, argv):
         if value in {"--memory-type", "--dataset-type"} and index + 1 < len(remaining):
             argument = remaining[index + 1]
             if value == "--memory-type":
-                if argument != "OurMem":
-                    parser.error("官方三阶段入口当前接入 OurMem；官方原生基线使用其一键入口")
-                translated += ["--baseline", "ourmem"]
+                if argument not in {"OurMem", "A-MEM"}:
+                    parser.error("官方三阶段入口当前接入 OurMem 和 A-MEM；官方原生基线使用其一键入口")
+                translated += ["--baseline", {"OurMem": "ourmem", "A-MEM": "amem"}[argument]]
             else:
                 translated += ["--benchmark", datasets.get(argument, argument)]
             index += 2

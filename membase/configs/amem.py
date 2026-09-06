@@ -16,6 +16,7 @@ class AMEMConfig(MemBaseConfig):
     )
     llm_api_key: str | None = Field(
         default=None,
+        repr=False, exclude=True,
         description=(
             "The API key to use for the LLM. It is used for openai backend. "
             "If not provided, the API key will be loaded from the environment variable."
@@ -39,6 +40,7 @@ class AMEMConfig(MemBaseConfig):
     )
     embedding_api_key: str | None = Field(
         default=None,
+        repr=False, exclude=True,
         description=(
             "The API key to use for the embedding model. It is used for openai backend. "
             "If not provided, the API key will be loaded from the environment variable."
@@ -62,6 +64,10 @@ class AMEMConfig(MemBaseConfig):
         description="The threshold for the number of memories to trigger evolution.",
         gt=0,
     )
+
+    preserve_unknown_time: bool = False
+    checkpoint_interval: int = Field(default=8, ge=1)
+    max_evidence_tokens: int = Field(default=8000, ge=1)
 
     def get_llm_models(self) -> list[str]:
         return [self.llm_model]
