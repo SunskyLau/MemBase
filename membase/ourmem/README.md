@@ -26,20 +26,22 @@
 
 ## 四个实验入口
 
-每个实验目录都有无密钥的 `run.example.sh`。复制成同目录下已忽略提交的 `run.sh`，填写顶部配置后执行 `./run.sh`；先运行 `./run.sh --dry-run` 可以核对实验范围而不调用模型、不创建记忆数据库。
+入口已统一到 `examples/evaluate_ourmem_on_<数据集>/`，其中有无密钥的 `run.example.sh` 和三个阶段脚本。复制为同目录已忽略的 `run.sh` 后填写配置；`./run.sh --dry-run` 核对范围，`./run.sh` 一键调用原三阶段运行器。详见 [统一实验流程](../../examples/README_experiments.md)。
 
 | 目录（相对仓库根目录） | 范围与评分 |
 | --- | --- |
-| `experiments/ourmem_locomo/` | 第 1～4 类问题；官方分类评分，额外模型评判单独报告。 |
-| `experiments/ourmem_longmemeval/` | LongMemEval-S 清洗版本；官方回答判分及分类汇总。 |
-| `experiments/ourmem_memoryagentbench/` | 已固定的八个冲突消解子集；官方子串匹配。 |
-| `experiments/ourmem_meme/` | 无填充、32k、128k 版本；变化前后分别提问，官方六类任务判分与平凡通过过滤。 |
+| `examples/evaluate_ourmem_on_locomo/` | 第 1～4 类问题；官方分类评分，额外模型评判单独报告。 |
+| `examples/evaluate_ourmem_on_longmemeval/` | LongMemEval-S 清洗版本；官方回答判分及分类汇总。 |
+| `examples/evaluate_ourmem_on_memoryagentbench/` | 主要范围为 6k、32k 单跳与多跳共 400 题；官方子串匹配。 |
+| `examples/evaluate_ourmem_on_meme/` | 无填充、32k、128k 版本；变化前后分别提问，官方六类任务判分与平凡通过过滤。 |
 
 `MODE` 选择 `smoke`、`core` 或 `full`。冒烟模式只减少样本及问题，不悄悄截短这些问题对应的历史。输出保存在各目录 `runs/<RUN_ID>/`，包括配置与源码指纹、每样本 SQLite、回答、证据、调用日志、成本及评分。
 
 同一个 `RUN_ID` 只复用完整且配置、数据和源码一致的阶段。修改方法、提示词或参数后使用新的 `RUN_ID`，不能混合新旧结果。MEME 的变化前回答只能来自变化前快照。
 
-入口通过 `scripts/run_benchmark.py` 调用 `membase/runners/ourmem.py`；输入白名单和来源映射位于 `membase/datasets/ourmem_benchmarks.py`，官方评分接入位于 `membase/evaluation/ourmem.py`。现有其他基线继续走原运行器。
+三阶段入口是根目录的 `memory_construction.py`、`memory_search.py`、`memory_evaluation.py`，实际逻辑复用 `ConstructionRunner`、`SearchRunner`、`EvaluationRunner`。`scripts/run_benchmark.py` 只串联阶段；公共协议上下文处理配置、并发与产物校验。数据通过原注册机制接入，官方白名单与评分工具分别位于 `membase/datasets/official.py` 和 `membase/evaluation/official.py`。六个官方基线仍保留原生执行，只统一公共启动与日志。
+
+本次没有跨运行缓存，也不迁移旧 V5 运行；请选择新的 `RUN_ID`。同一新格式运行中的完整阶段可复用，数据库存在但缺少完成记录时仍需继续处理。
 
 ## 验证与预算
 

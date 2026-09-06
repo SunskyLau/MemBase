@@ -15,7 +15,7 @@ EMBEDDING_MODEL="text-embedding-3-small"
 WORKERS=1
 SEED=0
 CHECK_WORKERS=8
-RUN_ID="v5_core_01"
+RUN_ID="membase_v5_core_01"
 DRY_RUN=0
 MEMORY_CONFIG=""                       # 可选：OurMem 参数 JSON，不含密钥
 MAX_LLM_REQUESTS=""                     # 留空为全量；受限验证可填 100
@@ -23,11 +23,15 @@ MAX_EMBEDDING_REQUESTS=""               # 留空为全量；受限验证可填 2
 BUDGET_LEDGER=""                        # 可选：跨实验共用的请求计数 SQLite
 LOCOMO_JUDGE=0                          # 额外模型评判，与官方 F1 分开
 
-case "${1:-}" in
-  "") ;;
-  --dry-run) DRY_RUN=1 ;;
-  *) echo "Usage: $0 [--dry-run]; edit configuration at the top." >&2; exit 2 ;;
-esac
+STAGE="all"
+for argument in "$@"; do
+  case "$argument" in
+    all|construction|search|evaluation) STAGE="$argument" ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) echo "Usage: $0 [all|construction|search|evaluation] [--dry-run]" >&2; exit 2 ;;
+  esac
+done
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 python_command=(conda run --no-capture-output -n "$CONDA_ENV" python)
@@ -43,9 +47,9 @@ fi
 [[ "$LOCOMO_JUDGE" != "1" ]] || extra_args+=(--locomo-judge)
 export OPENAI_API_KEY
 
-exec "${python_command[@]}" "${repo_root}/scripts/run_with_progress.py" --progress-interval "$PROGRESS_INTERVAL" \
-  --benchmark meme --baseline ourmem --mode "$MODE" \
-  --output-dir "${script_dir}/runs" --run-id "$RUN_ID" \
+exec "${python_command[@]}" "${repo_root}/scripts/run_with_progress.py" --progress-interval "$PROGRESS_INTERVAL" --entry "$STAGE" \
+  --benchmark longmemeval --baseline ourmem --mode "$MODE" \
+  --output-dir "${repo_root}/experiments/ourmem_longmemeval/runs" --run-id "$RUN_ID" \
   --base-url "$OPENAI_BASE_URL" --internal-model "$MEMORY_MODEL" \
   --answer-model "$ANSWER_MODEL" --judge-model "$JUDGE_MODEL" \
   --embedding-model "$EMBEDDING_MODEL" --workers "$WORKERS" --seed "$SEED" \
