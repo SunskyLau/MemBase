@@ -7,6 +7,8 @@ _MAPPING_NAMES: OrderedDict[str, str] = OrderedDict(
         ("MemBase", "MemBaseDataset"),
         ("LongMemEval", "LongMemEval"),
         ("LoCoMo", "LoCoMo"),
+        ("MemoryAgentBench", "MemoryAgentBench"),
+        ("MEME", "MEME"),
         ("RealMem", "RealMem"),
         ("MobileMem", "MobileMem"),
         ("MobileMemOmni", "MobileMemOmni"),
@@ -18,6 +20,8 @@ _MODULE_MAPPING: OrderedDict[str, str] = OrderedDict(
         ("MemBase", "base"),
         ("LongMemEval", "longmemeval"),
         ("LoCoMo", "locomo"),
+        ("MemoryAgentBench", "memoryagentbench"),
+        ("MEME", "meme"),
         ("RealMem", "realmem"),
         ("MobileMem", "mobilemem"),
         ("MobileMemOmni", "mobilemem_omni"),
@@ -33,12 +37,14 @@ DATASET_MAPPING = _LazyMapping(
 _ENV_MAPPING_NAMES: OrderedDict[str, str] = OrderedDict(
     [
         ("RealMem", "RealMemEvalEnv"),
+        ("MEME", "MEMEEvalEnv"),
     ]
 )
 
 _ENV_MODULE_MAPPING: OrderedDict[str, str] = OrderedDict(
     [
         ("RealMem", "realmem"),
+        ("MEME", "meme"),
     ]
 )
 

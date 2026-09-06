@@ -1,4 +1,4 @@
-"""调用固定官方评分定义；模型请求统一经过 OurMem 的成本及重试边界。"""
+"""方法无关的官方提示、评分与结果校验；模型接口由调用方注入。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from types import ModuleType
 
-from ..datasets.ourmem_benchmarks import Episode, Question
+from ..datasets.official import Episode, Question
 from ..utils.benchmark_files import read_json, write_json
 
 

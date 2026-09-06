@@ -27,7 +27,7 @@ class OurMemLayer(MemBaseLayer):
             text += f"\n[Image caption: {message.metadata['blip_caption']}]"
         return InputMessage(message_id=message.id, conversation_id=session_id,
                             content=text, speaker=message.name, role=message.role,
-                            mention_time=message.timestamp)
+                            mention_time=message.timestamp, source_order=message.source_order)
 
     def add_message(self, message: Message, **kwargs: Any) -> None:
         self.add_messages([message], **kwargs)
@@ -40,6 +40,13 @@ class OurMemLayer(MemBaseLayer):
     def flush(self) -> str:
         return self.system.flush(namespace=self.config.user_id)
 
+    def get_memory_snapshot(self, snapshot_id: str) -> dict:
+        return self.system.get_memory_snapshot(self.config.user_id, snapshot_id)
+
+    @classmethod
+    def from_config(cls, config, *, client=None):
+        return cls(config, client=client)
+
     def retrieve(self, query: str, k: int = 10, **kwargs: Any) -> list[MemoryEntry]:
         if k < 1:
             raise ValueError("k must be positive")
@@ -48,8 +55,6 @@ class OurMemLayer(MemBaseLayer):
                                                 snapshot_id=snapshot_id,
                                                 query_time=kwargs.get("query_time"))
         # k 限制返回条目数，不截断必要路径；完整证据作为一条上下文返回。
-        if not prepared.context:
-            return []
         return [MemoryEntry(content=prepared.context, formatted_content=prepared.context,
                             metadata={"snapshot_id": snapshot_id,
                                       **prepared.model_dump(mode="json", exclude={"context"})})]
@@ -91,3 +96,6 @@ class OurMemLayer(MemBaseLayer):
 
     def close(self) -> None:
         self.system.close()
+
+    def cleanup(self) -> None:
+        self.close()

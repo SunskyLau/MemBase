@@ -20,6 +20,11 @@ class MemBaseLayer(ABC):
     operations across different implementations.
     """
 
+    @classmethod
+    def from_config(cls, config, *, client=None):
+        """运行器的共同创建入口；不需要外部接口的方法保留原构造行为。"""
+        return cls(config)
+
     @abstractmethod
     def add_message(self, message: Message, **kwargs: Any) -> None:
         """Add a single message to the memory layer.

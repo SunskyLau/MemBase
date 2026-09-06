@@ -25,6 +25,31 @@ from ..model_types.memory import MemoryEntry
 from typing import Any, Callable
 
 
+def answer_question(config, sample, question, retrieval, client):
+    """在线观察点与普通评测共用同一个问答算子，官方消息不加包装。"""
+    import time
+    from ..evaluation.official import answer_prompt, answer_system, validate_answers
+    from ..inference_utils.backends import BoundedModelInterface
+    from .protocol import digest
+    prompt, limit = answer_prompt(config.benchmark, config.upstream_dir, sample, question, retrieval["context"])
+    system = answer_system(config.benchmark, config.upstream_dir)
+    messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+    operator = QuestionAnsweringOperator("default-question-answering", model_name=config.answer_model,
+                                        interface=BoundedModelInterface(client, model=config.answer_model),
+                                        message_builder=lambda query, context: messages)
+    started = time.monotonic()
+    response = operator([question.text], [retrieval["context"]], aggregate=False, batch_size=1,
+                        temperature=config.temperature if config.benchmark == "memoryagentbench" else 0,
+                        max_tokens=limit, allow_truncated=True)[0]
+    record = {**retrieval, "retrieval_sha256": digest(retrieval), "answer_text": response["processed_content"],
+              "answer_finish_reason": response["finish_reason"], "answer_request_id": response["request_id"],
+              "answer_seconds": time.monotonic() - started}
+    if response["finish_reason"] == "length":
+        record.update(resolution_status="incomplete", reason="answer_output_truncated")
+    validate_answers([record], (question,))
+    return record
+
+
 def evaluate_memory(
     retrievals: list[dict[str, Any]],
     qa_model: str,
@@ -409,7 +434,7 @@ class EvaluationRunner:
     delegates judgment to the dataset-specific evaluation logic.
     """
 
-    def __init__(self, config: EvaluationRunnerConfig) -> None:
+    def __init__(self, config: EvaluationRunnerConfig | None, *, runtime=None) -> None:
         """Initialize the evaluation runner.
 
         Args:
@@ -417,6 +442,88 @@ class EvaluationRunner:
                 The runner configuration.
         """
         self.config = config
+        self.runtime = runtime
+
+    def _evaluate_sample(self, sample):
+        from .protocol import checked, question_file, digest
+        from .search import validate_retrieval, require_observation_answers
+        from ..datasets.online_base import OnlineMemBaseDataset
+        from ..utils.benchmark_files import read_json, write_json, sha256_file
+        from ..evaluation.official import validate_answers, validate_scores
+        runtime, cfg = self.runtime, self.runtime.config
+        directory = runtime.prepare_sample(sample)
+        runtime.require_stage(sample, "search")
+        checkpoint = runtime.checkpoint(sample)
+        all_answers, phase_rows = [], {}
+        # 评测本身不必加载记忆；只使用检索阶段已经保存的完整证据。
+        from ..ourmem.llm import ModelClient
+        client = ModelClient(runtime.memory_config, budget=runtime.client.budget, log_path=directory / "requests.jsonl") if runtime.owns_client else runtime.client
+        scorer = runtime.scorer(sample, client)
+        try:
+            for phase in sample.phases:
+                folder = directory / phase.name
+                snapshot_id = runtime.require_snapshot(sample, phase)
+                if issubclass(runtime.dataset_cls, OnlineMemBaseDataset):
+                    rows = require_observation_answers(runtime, sample, phase, snapshot_id)
+                else:
+                    rows = []
+                    for question in phase.questions:
+                        identity = {"question_id": question.id, "question": question.text, "snapshot_id": snapshot_id}
+                        retrieval = checked(question_file(folder / "retrievals", question.id), identity, "检索结果")
+                        validate_retrieval(retrieval)
+                        path = question_file(folder / "answers", question.id)
+                        if path.exists():
+                            record = checked(path, {**identity, "retrieval_sha256": digest(retrieval)}, "回答")
+                            validate_answers([record], (question,))
+                        else:
+                            record = answer_question(cfg, sample, question, retrieval, client)
+                            write_json(path, record)
+                        rows.append(record)
+                validate_answers(rows, phase.questions)
+                write_json(folder / "answers.json", rows)
+                phase_rows[phase.name] = rows
+                if cfg.benchmark == "meme":
+                    continue
+                for question, record in zip(phase.questions, rows):
+                    path = question_file(folder / "scores", question.id)
+                    identity = {"answer_sha256": digest(record), "judge_model": cfg.judge_model}
+                    score = checked(path, identity, "评分") if path.exists() else {
+                        **identity, "scores": runtime.dataset_cls.evaluate([question.as_pair()], [record["answer_text"]],
+                                                                          protocol="official", official_scorer=scorer)[0]}
+                    validate_scores(cfg.benchmark, score["scores"], locomo_judge=cfg.locomo_judge)
+                    write_json(path, score)
+                    all_answers.append({**record, "scores": score["scores"]})
+            output = {"sample": sample.key, "manifest": read_json(directory / "manifest.json"), "answers": all_answers}
+            if cfg.benchmark == "meme":
+                raw = sample.reference
+                official = {"episode_id": raw["episode_id"], "domain": raw["domain"], "root": raw.get("root", ""),
+                            "config": {"agent_type": "ourmem", "agent_model": cfg.answer_model, "internal_model": cfg.internal_model},
+                            "memory_snapshots": {f"{p.name}_questions": read_json(directory / p.name / "memory_snapshot.json")["text"] for p in sample.phases}}
+                for phase in sample.phases:
+                    official[f"{phase.name}_answers"] = [
+                        {**question.reference, "agent_answer": row["answer_text"], "retrieved_context": row["context"],
+                         "read_audit": {k: row[k] for k in ("resolution_status", "reason", "coverage", "read_trace")}}
+                        for question, row in zip(phase.questions, phase_rows[phase.name])]
+                write_json(directory / "official_answers.json", official)
+                path, receipt = directory / "official_judge.json", directory / "judge_receipt.json"
+                identity = {"answer_sha256": digest(official), "judge_model": cfg.judge_model}
+                if path.exists() and receipt.exists() and read_json(receipt) == {**identity, "judge_sha256": sha256_file(path)}:
+                    judged = read_json(path)
+                else:
+                    judged = runtime.dataset_cls.evaluate([], [], protocol="official", official_scorer=scorer,
+                                                          episode=official, check_workers=cfg.check_workers)
+                    write_json(path, judged)
+                    write_json(receipt, {**identity, "judge_sha256": sha256_file(path)})
+                from ..evaluation.meme import validate_judge
+                validate_judge(path, official, cfg.judge_model)
+                output["judge"] = judged
+            write_json(directory / "result.json", output)
+            runtime.finish_stage(sample, "evaluation")
+            write_json(directory / "status.json", {"status": "complete"})
+            return output
+        finally:
+            if runtime.owns_client:
+                client.close()
 
     def _resolve_interface_kwargs(self) -> dict[str, Any]:
         """Build the interface keyword arguments for the LLM operator."""
@@ -446,6 +553,8 @@ class EvaluationRunner:
                 containing the question-answer pair, the prediction, the metrics,
                 the retrieved memories, and the user id.
         """
+        if self.runtime is not None:
+            return self.runtime.execute("evaluation", self._evaluate_sample)
         cfg = self.config
         interface_kwargs = self._resolve_interface_kwargs()
         dataset_cls = DATASET_MAPPING[cfg.dataset_type]

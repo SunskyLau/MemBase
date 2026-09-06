@@ -22,6 +22,14 @@ from typing import (
 )
 
 
+def _parse_timestamp(value: str) -> datetime:
+    """接受 ISO 时间和 MEME 的公开原格式；仅校验，不改写来源字符串。"""
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return datetime.strptime(value, "%Y/%m/%d (%a) %H:%M")
+
+
 class BaseMetadataModel(BaseModel):
     """Base class that provides a private metadata field and its serialization logic.
     
@@ -97,7 +105,7 @@ class Message(BaseMetadataModel):
     content: str = Field(
         description="Message content. Should be natural and contextually appropriate.",
     )
-    role: Literal["user", "assistant", "system"] = Field(
+    role: Literal["user", "assistant", "system", "tool"] = Field(
         description=(
             "Role of the message sender. Must be one of: 'user', 'assistant', 'system'. "
             "'user' means the message is from the user, 'assistant' means the message is from the AI assistant, "
@@ -106,11 +114,14 @@ class Message(BaseMetadataModel):
             "and actuators that collectively enable autonomous perception, reasoning, and action."
         ),
     )
-    timestamp: str = Field(
+    timestamp: str | None = Field(
+        default=None,
         description=(
-            "Timestamp when the message is sent, in ISO 8601 format."
+            "Public message timestamp in ISO 8601 or YYYY/MM/DD (weekday) HH:MM format."
         ),
     )
+
+    source_order: int | None = Field(default=None, ge=0, description="公开输入顺序；未知日期不补造。")
 
     def __lt__(self, other: Any) -> bool:
         """Compare messages based on their timestamp.
@@ -124,17 +135,27 @@ class Message(BaseMetadataModel):
                 True if this message's timestamp is earlier than the other's.
         """
         if isinstance(other, Message | QuestionAnswerPair):
-            return datetime.fromisoformat(self.timestamp) < datetime.fromisoformat(other.timestamp)
+            if self.source_order is not None and other.source_order is not None:
+                return self.source_order < other.source_order
+            if self.timestamp is None or other.timestamp is None:
+                return NotImplemented
+            return _parse_timestamp(self.timestamp) < _parse_timestamp(other.timestamp)
         if isinstance(other, Session):
-            return datetime.fromisoformat(self.timestamp) < datetime.fromisoformat(other.started_at)
+            if self.source_order is not None and other.messages and other.messages[0].source_order is not None:
+                return self.source_order < other.messages[0].source_order
+            if self.timestamp is None or other.started_at is None:
+                return NotImplemented
+            return _parse_timestamp(self.timestamp) < _parse_timestamp(other.started_at)
         return NotImplemented
 
     @field_validator("timestamp")
     @classmethod
-    def validate_timestamp(cls, v: str) -> str:
+    def validate_timestamp(cls, v: str | None) -> str | None:
         """Validate that `timestamp` is a valid ISO 8601 string."""
+        if v is None:
+            return None
         try:
-            _ = datetime.fromisoformat(v)
+            _ = _parse_timestamp(v)
         except ValueError:
             raise ValueError(
                 f"The timestamp '{v}' is not in a valid format. "
@@ -161,11 +182,14 @@ class QuestionAnswerPair(BaseMetadataModel):
         ),
         min_length=1,
     )
-    timestamp: str = Field(
+    timestamp: str | None = Field(
+        default=None,
         description=(
-            "Timestamp when the question is asked, in ISO 8601 format."
+            "Public question timestamp; absent dates remain unknown."
         ),
     )
+
+    source_order: int | None = Field(default=None, ge=0)
 
     def __lt__(self, other: Any) -> bool:
         """Compare question-answer pairs based on their timestamp.
@@ -179,17 +203,27 @@ class QuestionAnswerPair(BaseMetadataModel):
                 True if this question-answer pair is asked earlier than the other's.
         """
         if isinstance(other, Message | QuestionAnswerPair):
-            return datetime.fromisoformat(self.timestamp) < datetime.fromisoformat(other.timestamp)
+            if self.source_order is not None and other.source_order is not None:
+                return self.source_order < other.source_order
+            if self.timestamp is None or other.timestamp is None:
+                return NotImplemented
+            return _parse_timestamp(self.timestamp) < _parse_timestamp(other.timestamp)
         if isinstance(other, Session):
-            return datetime.fromisoformat(self.timestamp) < datetime.fromisoformat(other.started_at)
+            if self.source_order is not None and other.messages and other.messages[0].source_order is not None:
+                return self.source_order < other.messages[0].source_order
+            if self.timestamp is None or other.started_at is None:
+                return NotImplemented
+            return _parse_timestamp(self.timestamp) < _parse_timestamp(other.started_at)
         return NotImplemented
     
     @field_validator("timestamp")
     @classmethod
-    def validate_timestamp(cls, v: str) -> str:
+    def validate_timestamp(cls, v: str | None) -> str | None:
         """Validate that `timestamp` is a valid ISO 8601 string."""
+        if v is None:
+            return None
         try:
-            _ = datetime.fromisoformat(v)
+            _ = _parse_timestamp(v)
         except ValueError:
             raise ValueError(
                 f"The timestamp '{v}' is not in a valid format. "
@@ -211,7 +245,7 @@ class Session(BaseMetadataModel):
             "Ordered list of messages in the session. Should form a "
             "coherent, natural session."
         ),
-        min_length=1,
+        min_length=0,
     )
 
     def __lt__(self, other: Any) -> bool:
@@ -226,9 +260,17 @@ class Session(BaseMetadataModel):
                 True if this session started earlier than the other's.
         """
         if isinstance(other, Session):
-            return datetime.fromisoformat(self.started_at) < datetime.fromisoformat(other.started_at)
+            if self.messages and other.messages and self.messages[0].source_order is not None and other.messages[0].source_order is not None:
+                return self.messages[0].source_order < other.messages[0].source_order
+            if self.started_at is None or other.started_at is None:
+                return NotImplemented
+            return _parse_timestamp(self.started_at) < _parse_timestamp(other.started_at)
         if isinstance(other, Message | QuestionAnswerPair):
-            return datetime.fromisoformat(self.started_at) < datetime.fromisoformat(other.timestamp)
+            if self.messages and self.messages[0].source_order is not None and other.source_order is not None:
+                return self.messages[0].source_order < other.source_order
+            if self.started_at is None or other.timestamp is None:
+                return NotImplemented
+            return _parse_timestamp(self.started_at) < _parse_timestamp(other.timestamp)
         return NotImplemented
     
     @field_validator("messages")
@@ -249,7 +291,9 @@ class Session(BaseMetadataModel):
             if prev_msg is None:
                 prev_msg = current_msg
                 continue
-            if current_msg < prev_msg:
+            ordered = current_msg.source_order is not None and prev_msg.source_order is not None
+            dated = current_msg.timestamp is not None and prev_msg.timestamp is not None
+            if (ordered or dated) and current_msg < prev_msg:
                 raise ValueError(
                     "Messages must be in chronological order. "
                     f"The message at index {i} (timestamp: '{current_msg.timestamp}') "
@@ -261,7 +305,7 @@ class Session(BaseMetadataModel):
 
     @computed_field
     @property
-    def started_at(self) -> str:
+    def started_at(self) -> str | None:
         """Return the start time of the session (the first message's timestamp)
         in ISO 8601 format.
         
@@ -269,11 +313,11 @@ class Session(BaseMetadataModel):
             `str`:
                 The start time of the session in ISO 8601 format.
         """
-        return self.messages[0].timestamp
+        return self.messages[0].timestamp if self.messages else None
     
     @computed_field
     @property
-    def ended_at(self) -> str:
+    def ended_at(self) -> str | None:
         """Return the end time of the session (the last message's timestamp)
         in ISO 8601 format.
         
@@ -281,7 +325,7 @@ class Session(BaseMetadataModel):
             `str`:
                 The end time of the session in ISO 8601 format.
         """
-        return self.messages[-1].timestamp
+        return self.messages[-1].timestamp if self.messages else None
 
     @classmethod
     def create_from_messages(
@@ -304,7 +348,8 @@ class Session(BaseMetadataModel):
         # Pre-sort messages to satisfy the chronological validator.
         # Note that we allow identical timestamps for now.
         # In some datasets, there are multiple messages with the same timestamp.
-        sorted_messages = sorted(messages)
+        comparable = all(m.source_order is not None for m in messages) or all(m.timestamp is not None for m in messages)
+        sorted_messages = sorted(messages) if comparable else list(messages)
         
         instance = cls(messages=sorted_messages)
         if kwargs:
@@ -358,7 +403,8 @@ class Trajectory(BaseMetadataModel):
         """
         # Pre-sort sessions to satisfy the chronological validator.
         # In some datasets, there are multiple sessions with the same start time.
-        sorted_sessions = sorted(sessions)
+        comparable = all(s.messages and s.messages[0].source_order is not None for s in sessions) or all(s.started_at is not None for s in sessions)
+        sorted_sessions = sorted(sessions) if comparable else list(sessions)
         
         instance = cls(sessions=sorted_sessions)
         if kwargs:

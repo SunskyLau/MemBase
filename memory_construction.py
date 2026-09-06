@@ -1,14 +1,19 @@
 import argparse
-from membase import (
-    MEMORY_LAYERS_MAPPING,
-    DATASET_MAPPING,
-    ConstructionRunner,
-    ConstructionRunnerConfig,
-)
-from membase.utils import import_function_from_path
+import sys
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    from membase.runners.stage_cli import official_stage
+    argv = list(sys.argv[1:] if argv is None else argv)
+    result = official_stage("construction", argv)
+    if result is not None:
+        return result
+    from membase import (
+        MEMORY_LAYERS_MAPPING,
+        DATASET_MAPPING,
+    )
+    from membase.utils import import_function_from_path
+
     parser = argparse.ArgumentParser(
         description="A script used to evaluate various memory layers on various datasets."
     )
@@ -135,7 +140,8 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable execution graph tracing.",
     )
-    args = parser.parse_args()
+    parser.add_argument("--protocol", choices=["membase", "official"], default="membase")
+    args = parser.parse_args(argv)
 
     message_preprocessor = None
     if args.message_preprocessor_path is not None:
@@ -146,6 +152,8 @@ if __name__ == "__main__":
     if args.sample_filter_path is not None:
         sample_filter = import_function_from_path(args.sample_filter_path)
         print(f"A sample filter is loaded from '{args.sample_filter_path}'.")
+
+    from membase import ConstructionRunner, ConstructionRunnerConfig
 
     runner_config = ConstructionRunnerConfig(
         memory_type=args.memory_type,
@@ -169,3 +177,8 @@ if __name__ == "__main__":
         tracing=args.tracing,
     )
     ConstructionRunner(runner_config).run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

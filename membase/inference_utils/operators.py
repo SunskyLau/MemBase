@@ -4,6 +4,10 @@ from .base_operator import NonCachedLLMOperator
 class QuestionAnsweringOperator(NonCachedLLMOperator):
     """Operator that answers questions with an optional context."""
 
+    def __init__(self, *args, message_builder=None, **kwargs):
+        self.message_builder = message_builder
+        super().__init__(*args, **kwargs)
+
     def _preprocess(
         self, 
         question_list: list[str], 
@@ -26,6 +30,9 @@ class QuestionAnsweringOperator(NonCachedLLMOperator):
         for i in range(len(question_list)):
             question = question_list[i]
             context = context_list[i] if context_list is not None else None
+            if self.message_builder is not None:
+                messages_list.append(self.message_builder(question, context))
+                continue
             if context is not None:
                 messages = [
                     {
@@ -128,4 +135,3 @@ class LLMExactMatch(NonCachedLLMOperator):
                 ]
             messages_list.append(messages)
         return messages_list 
-

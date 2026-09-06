@@ -1,14 +1,19 @@
 import argparse
-from membase.utils import import_function_from_path
-from membase import (
-    MEMORY_LAYERS_MAPPING,
-    DATASET_MAPPING,
-    SearchRunner,
-    SearchRunnerConfig,
-)
+import sys
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    from membase.runners.stage_cli import official_stage
+    argv = list(sys.argv[1:] if argv is None else argv)
+    result = official_stage("search", argv)
+    if result is not None:
+        return result
+    from membase.utils import import_function_from_path
+    from membase import (
+        MEMORY_LAYERS_MAPPING,
+        DATASET_MAPPING,
+    )
+
     parser = argparse.ArgumentParser(
         description="A script to search memories for a given user based on questions."
     )
@@ -96,11 +101,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable execution graph tracing.",
     )
-    args = parser.parse_args()
+    parser.add_argument("--protocol", choices=["membase", "official"], default="membase")
+    args = parser.parse_args(argv)
 
     question_filter = None
     if args.question_filter_path is not None:
         question_filter = import_function_from_path(args.question_filter_path)
+
+    from membase import SearchRunner, SearchRunnerConfig
 
     runner_config = SearchRunnerConfig(
         memory_type=args.memory_type,
@@ -118,3 +126,8 @@ if __name__ == "__main__":
         tracing=args.tracing,
     )
     SearchRunner(runner_config).run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

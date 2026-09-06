@@ -82,7 +82,7 @@ def main() -> int:
 
     try:
         if args.real_data_extraction:
-            from membase.datasets.ourmem_benchmarks import default_paths, fingerprint, load_episodes
+            from membase.datasets.official import default_paths, fingerprint, load_episodes
             from membase.ourmem.extractor import FactExtractor
             from membase.ourmem.models import Source
             for benchmark in ("locomo", "longmemeval", "memoryagentbench", "meme"):

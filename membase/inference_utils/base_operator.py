@@ -17,6 +17,7 @@ class NonCachedLLMOperator(ABC):
         self, 
         prompt_name: str, 
         model_name: str | None = None,
+        interface=None,
         **kwargs: Any,
     ) -> None:
         """Initialize the operator.
@@ -38,7 +39,9 @@ class NonCachedLLMOperator(ABC):
                 )
         
         self.set_prompt(prompt_name)
-        if model_name is not None:
+        if interface is not None:
+            self._interface = interface
+        elif model_name is not None:
             self._interface = get_interface_for_inference(model_name, **kwargs)
         else:
             self._interface = None
@@ -194,4 +197,4 @@ class NonCachedLLMOperator(ABC):
         progress_bar.close()
         if aggregate:
             return self._aggregate(final_responses)
-        return final_responses 
+        return final_responses

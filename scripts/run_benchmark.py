@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-def main() -> int:
+def main(argv=None, *, stages=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", choices=["locomo", "longmemeval", "memoryagentbench", "meme"], required=True)
     parser.add_argument("--baseline", required=True)
@@ -38,7 +38,7 @@ def main() -> int:
     parser.add_argument("--max-embedding-requests", type=int)
     parser.add_argument("--budget-ledger", type=Path, help="多个受限验证共享的 SQLite 请求计数")
     parser.add_argument("--locomo-judge", action="store_true", help="额外报告 LoCoMo 模型评判；不替代官方 F1")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     from membase.datasets import memoryagentbench, meme
     from membase.runners.benchmark import BenchmarkRunConfig
@@ -47,15 +47,17 @@ def main() -> int:
                "meme": {"in_context", "bm25", "dense", "md_flat", "ourmem"}}
     if args.baseline not in allowed[args.benchmark]:
         parser.error(f"{args.benchmark} 支持的基线：{sorted(allowed[args.benchmark])}")
+    if stages is not None and args.baseline != "ourmem":
+        parser.error("官方原生基线使用一键入口，不支持独立三阶段执行")
     if args.baseline == "ourmem":
-        from membase.datasets.ourmem_benchmarks import default_paths
+        from membase.datasets.official import default_paths
         default_data, default_upstream = default_paths(args.benchmark)
         if args.top_k is not None:
             parser.error("OurMem 使用分阶段候选预算，不接受单一 --top-k；请使用 --memory-config")
         if any(value is not None and value < 0 for value in (args.max_llm_requests, args.max_embedding_requests)):
             parser.error("请求上限必须非负；不设置表示不限制")
-        from membase.runners.ourmem import OurMemRunConfig
-        config_type = OurMemRunConfig
+        from membase.runners.protocol import OfficialRunConfig
+        config_type = OfficialRunConfig
         extra = dict(embedding_model=args.embedding_model, memory_config=args.memory_config,
                      seed=args.seed, max_llm_requests=args.max_llm_requests,
                      max_embedding_requests=args.max_embedding_requests,
@@ -80,12 +82,19 @@ def main() -> int:
         workers=args.workers, judge_workers=args.judge_workers, check_workers=args.check_workers,
         dry_run=args.dry_run, **extra,
     )
+    return execute_config(config, stages=stages)
+
+
+def execute_config(config, *, stages=None):
     from membase.runners import memoryagentbench as mab_runner, meme as meme_runner
-    runner = mab_runner if args.benchmark == "memoryagentbench" else meme_runner
-    if args.baseline == "ourmem":
-        from membase.runners import ourmem as runner
+    runner = mab_runner if config.benchmark == "memoryagentbench" else meme_runner
+    if config.baseline == "ourmem":
+        from membase.runners import protocol as runner
     try:
-        runner.run(config)
+        if config.baseline == "ourmem":
+            runner.run(config, stages=stages or ("construction", "search", "evaluation"))
+        else:
+            runner.run(config)
     except (OSError, ValueError, RuntimeError, ImportError, KeyError, TypeError) as exc:
         # start_run 拒绝冲突配置时不能改写已有运行的状态。
         from membase.utils.benchmark_files import read_json

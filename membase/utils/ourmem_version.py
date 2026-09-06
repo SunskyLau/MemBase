@@ -15,12 +15,19 @@ class ImplementationMismatchError(ValueError):
 
 _LOCAL_FILES = (
     "membase/configs/ourmem.py", "membase/configs/base.py", "membase/layers/ourmem.py",
-    "membase/datasets/ourmem_benchmarks.py", "membase/datasets/memoryagentbench.py",
-    "membase/datasets/meme.py", "membase/evaluation/ourmem.py", "membase/evaluation/meme.py",
-    "membase/evaluation/memoryagentbench.py", "membase/runners/ourmem.py",
+    "membase/datasets/official.py", "membase/datasets/memoryagentbench.py",
+    "membase/datasets/meme.py", "membase/evaluation/official.py", "membase/evaluation/meme.py",
+    "membase/evaluation/memoryagentbench.py", "membase/runners/protocol.py",
     "membase/runners/benchmark.py", "membase/utils/benchmark_files.py",
     "membase/utils/experiment.py", "membase/utils/ourmem_version.py",
     "scripts/run_benchmark.py", "scripts/prepare_benchmarks.py", "envs/ourmem_requirements.txt",
+    "memory_construction.py", "memory_search.py", "memory_evaluation.py",
+    "membase/runners/construction.py", "membase/runners/search.py", "membase/runners/evaluation.py",
+    "membase/runners/stage_cli.py", "membase/model_types/dataset.py", "membase/layers/base.py",
+    "membase/datasets/base.py", "membase/datasets/locomo.py", "membase/datasets/longmemeval.py",
+    "membase/datasets/__init__.py", "membase/inference_utils/base_operator.py",
+    "membase/inference_utils/operators.py", "membase/inference_utils/backends.py",
+    "membase/inference_utils/prompts.py",
 )
 
 _OFFICIAL_FILES = {

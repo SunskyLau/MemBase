@@ -30,6 +30,85 @@ from typing import Any, Callable
 _LOCK = threading.Lock()
 
 
+def retrieve_question(layer, qa_pair, *, k=10, snapshot_id=None, query_time=None):
+    """各运行方式共用的检索入口；只传问题和公开时间，不传黄金元数据。"""
+    options = {}
+    if snapshot_id is not None:
+        options["snapshot_id"] = snapshot_id
+    if query_time is not None:
+        options["query_time"] = query_time
+    return layer.retrieve(qa_pair.question, k=k, **options)
+
+
+def validate_retrieval(record):
+    if not isinstance(record.get("context"), str) or not isinstance(record.get("retrieved_memories"), list):
+        raise ValueError("Invalid saved retrieval context")
+    if record.get("resolution_status") not in {"resolved", "unknown", "conflict", "deleted", "incomplete"}:
+        raise ValueError("Missing retrieval resolution status")
+    if not isinstance(record.get("coverage"), dict) or not isinstance(record.get("read_trace"), list):
+        raise ValueError("Missing retrieval audit")
+
+
+def search_phase(runtime, sample, phase, layer, snapshot_id, *, answer_now=False, client=None):
+    from .protocol import checked, question_file, digest
+    from .evaluation import answer_question
+    from ..utils.benchmark_files import write_json
+    from ..evaluation.official import validate_answers
+    folder = runtime.directory(sample) / phase.name
+    rows = []
+    for question in tqdm(phase.questions, desc=f"{sample.key}/{phase.name} 检索", leave=False):
+        pair = question.as_pair()
+        identity = {"question_id": question.id, "question": question.text, "snapshot_id": snapshot_id}
+        path = question_file(folder / "retrievals", question.id)
+        if path.exists():
+            record = checked(path, identity, "检索结果")
+        else:
+            entries = retrieve_question(layer, pair, snapshot_id=snapshot_id, query_time=pair.timestamp)
+            audit = entries[0].metadata if len(entries) == 1 else {}
+            record = {**identity, "user_id": sample.namespace, "qa_pair": pair.model_dump(mode="json"),
+                      "retrieved_memories": [entry.model_dump(mode="json") for entry in entries],
+                      "context": "\n\n".join(entry.formatted_content or entry.content for entry in entries),
+                      "resolution_status": audit.get("resolution_status", "incomplete"),
+                      "reason": audit.get("reason", "missing_read_audit"),
+                      "evidence_refs": audit.get("evidence_refs", []), "coverage": audit.get("coverage", {}),
+                      "read_trace": audit.get("read_trace", [])}
+            validate_retrieval(record)
+            write_json(path, record)
+        validate_retrieval(record)
+        if answer_now:
+            path = question_file(folder / "answers", question.id)
+            if path.exists():
+                answer = checked(path, {**identity, "retrieval_sha256": digest(record)}, "观察点回答")
+                validate_answers([answer], (question,))
+            else:
+                answer = answer_question(runtime.config, sample, question, record, client or runtime.client)
+                write_json(path, answer)
+            rows.append(answer)
+        else:
+            rows.append(record)
+    write_json(folder / ("answers.json" if answer_now else "retrievals.json"), rows)
+    return rows
+
+
+def require_observation_answers(runtime, sample, phase, snapshot_id):
+    from .protocol import checked, question_file, digest
+    from ..evaluation.official import validate_answers
+    records = []
+    for question in phase.questions:
+        identity = {"question_id": question.id, "question": question.text, "snapshot_id": snapshot_id}
+        folder = runtime.directory(sample) / phase.name
+        retrieval_path = question_file(folder / "retrievals", question.id)
+        answer_path = question_file(folder / "answers", question.id)
+        if not retrieval_path.exists() or not answer_path.exists():
+            raise ValueError("缺少早期观察点记录；不能从未来状态重新生成")
+        retrieval = checked(retrieval_path, identity, "早期观察点检索")
+        validate_retrieval(retrieval)
+        record = checked(answer_path, {**identity, "retrieval_sha256": digest(retrieval)}, "早期观察点回答")
+        validate_answers([record], (question,))
+        records.append(record)
+    return records
+
+
 def memory_search(
     layer_type: str,
     user_id: str,
@@ -170,7 +249,7 @@ def memory_search(
                 )
 
                 # Perform retrieval using the unified interface.
-                retrieved_memories = layer.retrieve(query, k=top_k)
+                retrieved_memories = retrieve_question(layer, qa_pair, k=top_k)
                 retrieval_result = {
                     "retrieved_memories": [
                         memory.model_dump(mode="python")
@@ -289,7 +368,7 @@ class SearchRunner:
     and saves the aggregated results to a JSON file.
     """
 
-    def __init__(self, config: SearchRunnerConfig) -> None:
+    def __init__(self, config: SearchRunnerConfig | None, *, runtime=None) -> None:
         """Initialize the search runner.
 
         Args:
@@ -297,6 +376,28 @@ class SearchRunner:
                 The runner configuration.
         """
         self.config = config
+        self.runtime = runtime
+
+    def _search_sample(self, sample):
+        from ..datasets.online_base import OnlineMemBaseDataset
+        from ..utils.benchmark_files import write_json
+        runtime = self.runtime
+        runtime.prepare_sample(sample)
+        runtime.require_stage(sample, "construction")
+        checkpoint = runtime.checkpoint(sample)
+        rows = []
+        if issubclass(runtime.dataset_cls, OnlineMemBaseDataset):
+            for phase in sample.phases:
+                snapshot = runtime.require_snapshot(sample, phase)
+                rows.extend(require_observation_answers(runtime, sample, phase, snapshot))
+        else:
+            with runtime.sample_scope(sample, load=True) as (layer, client):
+                for phase in sample.phases:
+                    snapshot = runtime.require_snapshot(sample, phase)
+                    rows.extend(search_phase(runtime, sample, phase, layer, snapshot, client=client))
+        write_json(runtime.directory(sample) / "search_results.json", rows)
+        runtime.finish_stage(sample, "search")
+        return {"retrievals": len(rows)}
 
     def _resolve_memory_config(self) -> dict[str, Any] | None:
         """Return the memory configuration dictionary."""
@@ -315,6 +416,8 @@ class SearchRunner:
                 A list of retrieval results. Each element is a dictionary 
                 containing the retrieved memories, the question-answer pair, and the user id.
         """
+        if self.runtime is not None:
+            return self.runtime.execute("search", self._search_sample)
         cfg = self.config
         config = self._resolve_memory_config()
 

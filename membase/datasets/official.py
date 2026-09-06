@@ -1,4 +1,4 @@
-"""官方格式到 OurMem 的白名单输入；答案及任务标签只保留在评测侧。"""
+"""固定官方协议的读取与白名单转换；不包含记忆方法或实验执行逻辑。"""
 
 from __future__ import annotations
 
@@ -38,6 +38,14 @@ class Question:
     query_time: str | None
     reference: dict  # 绝不传给记忆系统。
 
+    def as_pair(self):
+        from ..model_types.dataset import QuestionAnswerPair
+        answer = self.reference.get("answer", self.reference.get("gold_answer", self.reference.get("expected_answer", self.reference.get("entity_values"))))
+        answers = answer if isinstance(answer, list) and answer else [answer]
+        return QuestionAnswerPair(id=self.id, question=self.text, timestamp=self.query_time,
+                                  golden_answers=[str(v) if isinstance(v, (str, int, float)) else json.dumps(v, ensure_ascii=False) for v in answers],
+                                  metadata={"official_reference": self.reference})
+
 
 @dataclass(frozen=True)
 class Phase:
@@ -55,6 +63,19 @@ class Episode:
     input_policy: dict
     reference: dict
     source_mapping: dict
+
+    def as_trajectory(self):
+        from ..model_types.dataset import Message, Session, Trajectory
+        sessions, order = [], 0
+        for index, raw in enumerate(self.sessions):
+            messages = []
+            for item in raw:
+                messages.append(Message(id=item["message_id"], name=item["speaker"], role=item["role"],
+                                        content=item["content"], timestamp=item["mention_time"], source_order=order))
+                order += 1
+            identity = raw[0]["conversation_id"] if raw else _opaque("conversation", f"{self.namespace}:{index}")
+            sessions.append(Session(id=identity, messages=messages, metadata={"original_session_index": index}))
+        return Trajectory(id=self.namespace, sessions=sessions, metadata={"protocol": "official"})
 
 
 def default_paths(benchmark: str) -> tuple[Path, Path]:

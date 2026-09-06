@@ -133,6 +133,7 @@ def main() -> int:
     parser.add_argument("--progress-interval", type=float, default=10)
     parser.add_argument("--watch", type=Path)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--entry", choices=["all", "construction", "search", "evaluation"], default="all")
     options, remaining = parser.parse_known_args()
     if options.progress_interval <= 0:
         parser.error("progress-interval 必须大于 0")
@@ -151,7 +152,9 @@ def main() -> int:
         except KeyboardInterrupt:
             print("停止查看；原实验未受影响。")
             return 0
-    command = [sys.executable, "-u", str(ROOT / "scripts/run_benchmark.py"), *remaining]
+    entry = ROOT / "scripts/run_benchmark.py" if options.entry == "all" else ROOT / f"memory_{options.entry}.py"
+    protocol = [] if options.entry == "all" else ["--protocol", "official"]
+    command = [sys.executable, "-u", str(entry), *protocol, *remaining]
     if "--dry-run" in remaining or "--help" in remaining or "-h" in remaining:
         return subprocess.call(command)  # 不启动观察器，也不创建日志或数据库。
     location = argparse.ArgumentParser(add_help=False, allow_abbrev=False)

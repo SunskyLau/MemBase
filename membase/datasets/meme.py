@@ -12,6 +12,41 @@ from ..utils.benchmark_files import (
     verify_hash, verify_repository,
 )
 
+
+def __getattr__(name):
+    if name in {"MEME", "MEMEEvalEnv"}:
+        from typing import Any
+        from pydantic import ConfigDict
+        from .base import MemBaseDataset
+        from .online_base import OnlineMemBaseDataset, OnlineEvalEnv
+        class MEMEEvalEnv(OnlineEvalEnv):
+            model_config = ConfigDict(arbitrary_types_allowed=True)
+            runtime: Any
+            sample: Any
+            phase: Any
+            snapshot_id: str
+            client: Any
+        class MEME(MemBaseDataset, OnlineMemBaseDataset):
+            @classmethod
+            def read_raw_data(cls, path, *, mode="core", protocol="official"):
+                if protocol != "official":
+                    raise ValueError("MEME requires its official protocol")
+                return cls.read_official_data(path, mode)
+
+            @classmethod
+            def online_evaluate(cls, messages, layer, env):
+                from ..runners.search import search_phase
+                return search_phase(env.runtime, env.sample, env.phase, layer, env.snapshot_id, answer_now=True, client=env.client)
+
+            @classmethod
+            def evaluate(cls, qa_pairs, predictions, **kwargs):
+                if kwargs.get("protocol") == "official":
+                    return kwargs["official_scorer"].score_meme(kwargs["episode"], kwargs.get("check_workers", 8))
+                return super().evaluate(qa_pairs, predictions, **kwargs)
+        globals().update(MEME=MEME, MEMEEvalEnv=MEMEEvalEnv)
+        return globals()[name]
+    raise AttributeError(name)
+
 UPSTREAM_URL = "https://github.com/SeokwonJung-Jay/MEME-public.git"
 UPSTREAM_COMMIT = "0271ad85389a963cbc4892a36391f868ba4d18d1"
 DATASET_REVISION = "03932fd33a08debf182ad01a47504024201d86f2"

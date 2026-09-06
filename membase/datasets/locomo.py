@@ -24,7 +24,9 @@ class LoCoMo(MemBaseDataset):
     """Dataset wrapper for LoCoMo."""
 
     @classmethod
-    def read_raw_data(cls, path: str) -> Self:
+    def read_raw_data(cls, path: str, *, protocol="membase", mode="core") -> Self:
+        if protocol == "official":
+            return cls.read_official_data(path, mode)
         category_id_to_type = {
             1: "multi-hop",
             2: "temporal",

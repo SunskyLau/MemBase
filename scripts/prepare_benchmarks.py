@@ -23,7 +23,7 @@ def main() -> int:
         for module in selected:
             result = module.check() if args.check_only else module.prepare()
             print(json.dumps(result, ensure_ascii=False, indent=2))
-        from membase.datasets.ourmem_benchmarks import prepare_qa
+        from membase.datasets.official import prepare_qa
         for benchmark in ("locomo", "longmemeval"):
             if args.benchmark in {"all", benchmark}:
                 print(json.dumps(prepare_qa(benchmark, check_only=args.check_only), ensure_ascii=False, indent=2))

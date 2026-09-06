@@ -178,8 +178,13 @@ class ExperimentProgress:
 
     def poll(self) -> list[str]:
         manifest = read_record(self.run_dir / "config.json")
-        status = read_record(self.run_dir / "status.json").get("status", "等待初始化")
+        state = read_record(self.run_dir / "status.json")
+        status = state.get("status", "等待初始化")
         header = f"[{datetime.now(timezone.utc):%H:%M:%S} UTC] 记录状态：{status}"
+        stage = state.get("stage") or state.get("completed_stage")
+        if stage:
+            label = {"construction": "构建", "search": "检索", "evaluation": "回答与评分"}.get(stage, stage)
+            header += f"；阶段：{label}"
         if not manifest:
             return [header + "；正在检查环境、数据或运行配置"]
         config = manifest.get("config", {})

@@ -15,6 +15,25 @@ class MemBaseDataset(MemoryDataset):
     """
 
     @classmethod
+    def iter_official(cls, path, mode="core"):
+        from pathlib import Path
+        from .official import load_episodes
+        names = {"LoCoMo": "locomo", "LongMemEval": "longmemeval", "MemoryAgentBench": "memoryagentbench", "MEME": "meme"}
+        if cls.__name__ not in names:
+            raise ValueError(f"{cls.__name__} has no pinned official protocol")
+        path = Path(path)
+        if cls.__name__ in {"LoCoMo", "LongMemEval"} and path.is_file():
+            path = path.parent
+        return load_episodes(names[cls.__name__], path, mode)
+
+    @classmethod
+    def read_official_data(cls, path, mode="core"):
+        samples = list(cls.iter_official(path, mode))
+        return cls(trajectories=[s.as_trajectory() for s in samples],
+                   qa_pair_lists=[[q.as_pair() for p in s.phases for q in p.questions] for s in samples],
+                   metadata={"protocol": "official"})
+
+    @classmethod
     def get_judge_template_name(cls, qa_pair: QuestionAnswerPair) -> str:
         """Get the judge prompt template name for a question-answer pair.
 
@@ -116,6 +135,14 @@ class MemBaseDataset(MemoryDataset):
             `list[dict[str, MetricResult]]`:
                 Per-pair evaluation results containing the metrics.
         """
+        if kwargs.get("protocol") == "official":
+            from .official import Question
+            scorer = kwargs["official_scorer"]
+            if len(qa_pairs) != len(predictions):
+                raise ValueError("Official questions and predictions must have equal length")
+            return [scorer.score(Question(pair.id, pair.question, pair.timestamp, pair.metadata["official_reference"]), prediction)
+                    for pair, prediction in zip(qa_pairs, predictions)]
+
         if len(qa_pairs) != len(predictions):
             raise ValueError(
                 f"The number of question-answer pairs ({len(qa_pairs)}) and predictions "

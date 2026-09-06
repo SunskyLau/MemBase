@@ -52,6 +52,8 @@ def memory_construction(
     traced_data_save_dir: str | None = None,
     dataset_cls: type[MemoryDataset] | None = None,
     online_eval_env: OnlineEvalEnv | None = None,
+    *, layer=None, start_session: int = 0, on_session=None,
+    skip_existing: bool = True, cleanup: bool = True, iteration_delay: float = 0.2,
 ) -> dict[str, float | list[OnlineEvalResult]]: 
     """Given a specific interaction trajectory, build a memory for one user.
 
@@ -83,8 +85,8 @@ def memory_construction(
             The dataset class. When it is an online dataset, the memory construction process is 
             routed to its evaluation logic for task messages.
         online_eval_env (`OnlineEvalEnv | None`, optional):
-            Evaluation environment for online datasets. If not provided, online
-            evaluation is skipped even for task messages.
+            Evaluation environment for online datasets. A task message in an
+            online dataset requires this environment; it cannot become memory.
 
     Returns:
         `dict[str, float | list[OnlineEvalResult]]`: 
@@ -92,19 +94,16 @@ def memory_construction(
             adding new message. If the dataset is an online dataset, the evaluation results are 
             also included.
     """
-    config = deepcopy(config) or {}
-    # It overrides the user id in the config. 
-    config["user_id"] = user_id 
-    # Each user has a distinct config directory.
-    config["save_dir"] = f"{config['save_dir']}/{user_id}" 
-
-    # Use lazy mapping to load config and layer classes.
-    config_cls = CONFIG_MAPPING[layer_type]
-    config = config_cls(**config)
-    layer_cls = MEMORY_LAYERS_MAPPING[layer_type] 
-    
-    with _LOCK:
-        layer = layer_cls(config)
+    if layer is None:
+        config = deepcopy(config) or {}
+        config["user_id"] = user_id
+        config["save_dir"] = f"{config['save_dir']}/{user_id}"
+        config = CONFIG_MAPPING[layer_type](**config)
+        layer_cls = MEMORY_LAYERS_MAPPING[layer_type]
+        with _LOCK:
+            layer = layer_cls(config)
+    else:
+        config = layer.config
 
     if message_preprocessor is None:
         message_preprocessor = lambda message: message
@@ -123,7 +122,7 @@ def memory_construction(
 
     with _LOCK:
         # It includes I/O operations. 
-        if not rerun and layer.load_memory(user_id):
+        if skip_existing and not rerun and layer.load_memory(user_id):
             print(f"🔄 The memory for user '{user_id}' is loaded successfully 😄.")
             return output
     
@@ -153,6 +152,9 @@ def memory_construction(
             num_add_failed = 0
             num_eval_failed = 0
             for i, session in enumerate(trajectory, start=1):
+                if i <= start_session:
+                    pbar.update(len(session))
+                    continue
                 with comment_session(
                     session_id=session.id, 
                     comment=f"It is the {i}th conversational session.", 
@@ -174,6 +176,8 @@ def memory_construction(
                                     )
                                     output["eval_results"].extend(eval_result)
                                 else:
+                                    if dataset_cls is not None and issubclass(dataset_cls, OnlineMemBaseDataset):
+                                        raise ValueError("Online task requires a registered evaluation environment")
                                     if dataset_cls is not None:
                                         warnings.warn(
                                             f"Message '{message.id}' is marked as a task but "
@@ -213,7 +217,10 @@ def memory_construction(
                         output["total_add_time"] += (end_time - start_time).total_seconds()
 
                         pbar.update(1) 
-                        time.sleep(0.2)
+                        time.sleep(iteration_delay)
+                if on_session is not None:
+                    snapshot_id = layer.flush()
+                    on_session(i - 1, layer, snapshot_id)
             pbar.close()
 
             total_failed = num_add_failed + num_eval_failed
@@ -246,7 +253,8 @@ def memory_construction(
     # It includes I/O operations. 
     with _LOCK:
         layer.save_memory() 
-        layer.cleanup()
+        if cleanup:
+            layer.cleanup()
     output["avg_add_time"] = output["total_add_time"] / len(trajectory)
 
     # Finally, if the tracing is enabled, we export the graph to a JSON file.
@@ -388,7 +396,7 @@ class ConstructionRunner:
     evaluation results.
     """
 
-    def __init__(self, config: ConstructionRunnerConfig) -> None:
+    def __init__(self, config: ConstructionRunnerConfig | None, *, runtime=None) -> None:
         """Initialize the construction runner.
 
         Args:
@@ -396,6 +404,70 @@ class ConstructionRunner:
                 The runner configuration.
         """
         self.config = config
+        self.runtime = runtime
+
+    def _construct_sample(self, sample):
+        from ..utils.benchmark_files import write_json, sha256_file
+        from .search import require_observation_answers
+        runtime = self.runtime
+        directory = runtime.prepare_sample(sample)
+        checkpoint = runtime.checkpoint(sample)
+        target_end = max(phase.session_end for phase in sample.phases)
+        if checkpoint["sessions_ingested"] > target_end:
+            raise ValueError("检查点已经摄入本次观察范围之外的未来信息")
+        with runtime.sample_scope(sample) as (layer, client):
+            def observe(phase, snapshot_id):
+                if checkpoint["sessions_ingested"] > phase.session_end:
+                    require_observation_answers(runtime, sample, phase, snapshot_id)
+                    return
+                if runtime.dataset_cls.__name__ not in ONLINE_EVAL_ENV_MAPPING:
+                    raise ValueError("Missing online observation environment")
+                env_cls = ONLINE_EVAL_ENV_MAPPING[runtime.dataset_cls.__name__]
+                env = env_cls(runtime=runtime, sample=sample, phase=phase, snapshot_id=snapshot_id, client=client)
+                # 使用原数据集在线评估扩展；任务和答案不作为消息添加。
+                runtime.dataset_cls.online_evaluate([], layer, env)
+
+            def finish_session(index, current_layer, snapshot_id):
+                checkpoint.update(sessions_ingested=index + 1, last_snapshot_id=snapshot_id)
+                for phase in sample.phases:
+                    if phase.session_end == index + 1:
+                        path = directory / phase.name / "memory_snapshot.json"
+                        write_json(path, current_layer.get_memory_snapshot(snapshot_id))
+                        checkpoint["phases"][phase.name] = {"snapshot_id": snapshot_id, "snapshot_sha256": sha256_file(path)}
+                write_json(directory / "checkpoint.json", checkpoint)
+                if issubclass(runtime.dataset_cls, OnlineMemBaseDataset):
+                    for phase in sample.phases:
+                        if phase.session_end == index + 1:
+                            observe(phase, snapshot_id)
+
+            if checkpoint["sessions_ingested"] or (directory / "construction.json").exists():
+                if not layer.load_memory(sample.namespace):
+                    raise ValueError("Checkpoint exists but its memory is missing")
+                if issubclass(runtime.dataset_cls, OnlineMemBaseDataset):
+                    for phase in sample.phases:
+                        if phase.session_end <= checkpoint["sessions_ingested"]:
+                            if phase.name not in checkpoint["phases"]:
+                                raise ValueError("Missing earlier observation snapshot")
+                            observe(phase, runtime.require_snapshot(sample, phase))
+            if (directory / "construction.json").exists():
+                runtime.require_stage(sample, "construction")
+                if checkpoint["sessions_ingested"] != target_end:
+                    raise ValueError("Construction receipt disagrees with the input checkpoint")
+                for phase in sample.phases:
+                    runtime.require_snapshot(sample, phase)
+                return {"reused": True}
+            layer.add_messages([], input_policy=sample.input_policy)
+            if checkpoint["sessions_ingested"] == 0 and any(p.session_end == 0 for p in sample.phases):
+                finish_session(-1, layer, layer.flush())
+            if target_end:
+                trajectory = sample.as_trajectory()
+                trajectory = trajectory.model_copy(update={"sessions": trajectory.sessions[:target_end]})
+                memory_construction("OurMem", sample.namespace, trajectory,
+                                    config=runtime.memory_config.model_dump(mode="python"), layer=layer,
+                                    start_session=checkpoint["sessions_ingested"], on_session=finish_session,
+                                    skip_existing=False, cleanup=False, iteration_delay=0, dataset_cls=runtime.dataset_cls)
+            runtime.finish_stage(sample, "construction")
+            return {"sessions": checkpoint["sessions_ingested"]}
 
     def _resolve_memory_config(self) -> dict[str, Any] | None:
         """Return the memory configuration dictionary."""
@@ -415,6 +487,8 @@ class ConstructionRunner:
                 the average time per operation of adding new message. 
                 If the dataset is an online dataset, the evaluation results are also included.
         """
+        if self.runtime is not None:
+            return self.runtime.execute("construction", self._construct_sample)
         cfg = self.config
         config = self._resolve_memory_config()
 
@@ -547,6 +621,8 @@ class ConstructionRunner:
                     results.append(result)
                 except Exception as e:
                     print(f"❌ Error occurs when the trajectory is processed: {e}")
+                    if cfg.strict:
+                        raise
 
         if len(results) == end_idx - start_idx:
             print("The memory construction process is completed successfully 😀.")

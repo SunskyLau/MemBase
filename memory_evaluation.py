@@ -1,13 +1,18 @@
 import argparse
-from membase import (
-    DATASET_MAPPING,
-    EvaluationRunner,
-    EvaluationRunnerConfig,
-)
-from membase.utils import import_function_from_path
+import sys
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    from membase.runners.stage_cli import official_stage
+    argv = list(sys.argv[1:] if argv is None else argv)
+    result = official_stage("evaluation", argv)
+    if result is not None:
+        return result
+    from membase import (
+        DATASET_MAPPING,
+    )
+    from membase.utils import import_function_from_path
+
     parser = argparse.ArgumentParser(
         description="A script to evaluate the answers of the search results."
     )
@@ -97,7 +102,8 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable execution graph tracing.",
     )
-    args = parser.parse_args()
+    parser.add_argument("--protocol", choices=["membase", "official"], default="membase")
+    args = parser.parse_args(argv)
 
     context_builder = (
         import_function_from_path(args.context_builder)
@@ -107,6 +113,8 @@ if __name__ == "__main__":
         import_function_from_path(args.prompt_template)
         if args.prompt_template is not None else None
     )
+
+    from membase import EvaluationRunner, EvaluationRunnerConfig
 
     runner_config = EvaluationRunnerConfig(
         search_results_path=args.search_results_path,
@@ -124,3 +132,8 @@ if __name__ == "__main__":
         tracing=args.tracing,
     )
     EvaluationRunner(runner_config).run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

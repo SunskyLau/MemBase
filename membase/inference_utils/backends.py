@@ -11,6 +11,25 @@ import warnings
 from typing import Any, Callable
 
 
+class BoundedModelInterface:
+    """将已有有界客户端接入通用算子；不再创建 SDK 客户端或叠加重试。"""
+    def __init__(self, client, *, model, stage="answer"):
+        self.client, self.model, self.stage = client, model, stage
+
+    def __call__(self, messages_list, **kwargs):
+        outputs = []
+        for messages in messages_list:
+            roles = [message["role"] for message in messages]
+            if roles not in (["user"], ["system", "user"]):
+                raise ValueError("The bounded text interface requires one user message and an optional system message")
+            value = self.client.text(messages[-1]["content"], model=self.model, stage=self.stage,
+                                     system=messages[0]["content"] if len(messages) == 2 else None, **kwargs)
+            outputs.append({"content": str(value), "processed_content": str(value),
+                            "finish_reason": getattr(value, "finish_reason", "stop"),
+                            "request_id": getattr(value, "request_id", None)})
+        return outputs
+
+
 class OpenAIClient(OpenAI): 
     """An OpenAI client with built-in retry and streaming support."""
 

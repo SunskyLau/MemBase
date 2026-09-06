@@ -14,7 +14,9 @@ class LongMemEval(MemBaseDataset):
     """Dataset wrapper for LongMemEval."""
 
     @classmethod
-    def read_raw_data(cls, path: str) -> Self:
+    def read_raw_data(cls, path: str, *, protocol="membase", mode="core") -> Self:
+        if protocol == "official":
+            return cls.read_official_data(path, mode)
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 

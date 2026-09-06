@@ -10,6 +10,21 @@ from ..utils.benchmark_files import (
     verify_hash, verify_repository, write_json,
 )
 
+
+def __getattr__(name):
+    if name == "MemoryAgentBench":
+        from .base import MemBaseDataset
+        class MemoryAgentBench(MemBaseDataset):
+            """冲突消解数据的公共数据集接入。"""
+            @classmethod
+            def read_raw_data(cls, path, *, mode="core", protocol="official"):
+                if protocol != "official":
+                    raise ValueError("MemoryAgentBench requires its official protocol")
+                return cls.read_official_data(path, mode)
+        globals()[name] = MemoryAgentBench
+        return MemoryAgentBench
+    raise AttributeError(name)
+
 UPSTREAM_URL = "https://github.com/HUST-AI-HYZ/MemoryAgentBench.git"
 UPSTREAM_COMMIT = "fe1735de8cf8b9908e1e3d3b5612afc815698062"
 DATASET_REVISION = "7ea066982b140a19337e17e60d45d4076e042faf"
