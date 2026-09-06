@@ -8,3 +8,7 @@
 /meme_bm25/run.sh
 /meme_dense/run.sh
 /meme_md_flat/run.sh
+/ourmem_locomo/run.sh
+/ourmem_longmemeval/run.sh
+/ourmem_memoryagentbench/run.sh
+/ourmem_meme/run.sh

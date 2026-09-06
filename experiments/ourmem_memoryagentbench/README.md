@@ -1,4 +1,4 @@
-# OurMem — locomo
+# OurMem — memoryagentbench
 
 在本目录填写 `run.sh` 顶部配置后运行：
 
@@ -7,9 +7,9 @@
 ./run.sh
 ```
 
-新克隆的项目先把无密钥的 `run.example.sh` 复制为 `run.sh`。运行脚本可从任意工作目录调用。环境使用 `membase-ourmem`；数据与官方代码准备入口为项目根目录的 `python scripts/prepare_benchmarks.py --benchmark locomo`，加 `--check-only` 只核对。
+新克隆的项目先把无密钥的 `run.example.sh` 复制为 `run.sh`。运行脚本可从任意工作目录调用。环境使用 `membase-ourmem`；数据与官方代码准备入口为项目根目录的 `python scripts/prepare_benchmarks.py --benchmark memoryagentbench`，加 `--check-only` 只核对。
 
-默认评估第 1–4 类，按官方分类规则报告 F1。`LOCOMO_JUDGE=1` 可另外报告模型评判，二者不混合。冒烟模式使用第一段对话的完整历史和前四个合规问题。旧版运行产物保持原样；V5 不复用旧 JSON 记忆。
+只评估冲突消解（Conflict Resolution）。本项目主要评估范围为 `MODE="core"`：6k、32k 的单跳（single-hop）与多跳（multi-hop），共四个完整子集、400 题。`smoke` 仅用于检查流程，使用 6k 单跳（single-hop）的完整输入及前 4 题；`full` 额外包含 64k、262k，共八组 800 题。这些模式是本项目的运行约定，不能将 `core` 称为 MAB 官方主实验范围。输入保留公开事实序号；采用官方提示与子串精确匹配（substring exact match）评分，不调用模型评判。
 
 方法参数默认沿用 V5（最多 5 层派生）。`MEMORY_CONFIG` 可指定不含凭据的参数 JSON；不要给 OurMem 设置基线通用的单一检索数量。多个独立样本可通过 `WORKERS` 并发，同一样本始终顺序写入。
 

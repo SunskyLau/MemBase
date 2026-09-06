@@ -1,4 +1,4 @@
-# OurMem — locomo
+# OurMem — longmemeval
 
 在本目录填写 `run.sh` 顶部配置后运行：
 
@@ -7,9 +7,9 @@
 ./run.sh
 ```
 
-新克隆的项目先把无密钥的 `run.example.sh` 复制为 `run.sh`。运行脚本可从任意工作目录调用。环境使用 `membase-ourmem`；数据与官方代码准备入口为项目根目录的 `python scripts/prepare_benchmarks.py --benchmark locomo`，加 `--check-only` 只核对。
+新克隆的项目先把无密钥的 `run.example.sh` 复制为 `run.sh`。运行脚本可从任意工作目录调用。环境使用 `membase-ourmem`；数据与官方代码准备入口为项目根目录的 `python scripts/prepare_benchmarks.py --benchmark longmemeval`，加 `--check-only` 只核对。
 
-默认评估第 1–4 类，按官方分类规则报告 F1。`LOCOMO_JUDGE=1` 可另外报告模型评判，二者不混合。冒烟模式使用第一段对话的完整历史和前四个合规问题。旧版运行产物保持原样；V5 不复用旧 JSON 记忆。
+使用固定的 LongMemEval-S 清洗版本，完整保留用户与助手消息。冒烟模式使用第一题的完整历史；核心与全量模式均为全部 500 题。采用官方分类判分提示，总体与分类结果分开保存。
 
 方法参数默认沿用 V5（最多 5 层派生）。`MEMORY_CONFIG` 可指定不含凭据的参数 JSON；不要给 OurMem 设置基线通用的单一检索数量。多个独立样本可通过 `WORKERS` 并发，同一样本始终顺序写入。
 

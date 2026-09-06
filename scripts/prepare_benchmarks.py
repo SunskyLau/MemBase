@@ -13,16 +13,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--benchmark", choices=["all", "memoryagentbench", "meme"], default="all")
+    parser.add_argument("--benchmark", choices=["all", "locomo", "longmemeval", "memoryagentbench", "meme"], default="all")
     parser.add_argument("--check-only", action="store_true", help="只校验已准备的数据，不下载、不修改文件")
     args = parser.parse_args()
     from membase.datasets import memoryagentbench, meme
-    selected = [memoryagentbench, meme] if args.benchmark == "all" else [
-        memoryagentbench if args.benchmark == "memoryagentbench" else meme]
+    selected = [memoryagentbench, meme] if args.benchmark == "all" else {
+        "memoryagentbench": [memoryagentbench], "meme": [meme]}.get(args.benchmark, [])
     try:
         for module in selected:
             result = module.check() if args.check_only else module.prepare()
             print(json.dumps(result, ensure_ascii=False, indent=2))
+        from membase.datasets.ourmem_benchmarks import prepare_qa
+        for benchmark in ("locomo", "longmemeval"):
+            if args.benchmark in {"all", benchmark}:
+                print(json.dumps(prepare_qa(benchmark, check_only=args.check_only), ensure_ascii=False, indent=2))
     except (OSError, ValueError, ImportError, subprocess.CalledProcessError) as exc:
         print(f"数据准备失败：{exc}", file=sys.stderr)
         return 1
