@@ -1,105 +1,93 @@
+"""MemBase 的薄适配层；写入、控制与读取语义均由 OurMemSystem 负责。"""
+
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, ClassVar
 
 from .base import MemBaseLayer
 from ..configs.ourmem import OurMemConfig
 from ..model_types.dataset import Message
 from ..model_types.memory import MemoryEntry
-from ..ourmem import OurMemSystem
+from ..ourmem.models import InputMessage, InputPolicy
+from ..ourmem.system import OurMemSystem, _opaque
 
 
 class OurMemLayer(MemBaseLayer):
-    """将 OurMemSystem 适配到 MemBase 的统一评测接口。"""
-
     layer_type: ClassVar[str] = "OurMem"
 
-    def __init__(self, config: OurMemConfig) -> None:
+    def __init__(self, config: OurMemConfig, client=None) -> None:
         self.config = config
-        self.system = self._new_system()
-        self._current_session_id: str | None = None
-        self._message_index = 0
-        self._message_buffer: list[Message] = []
+        self.system = OurMemSystem(config=config, storage_dir=config.save_dir, client=client)
 
-    def _new_system(self) -> OurMemSystem:
-        return OurMemSystem(
-            model_name=self.config.model_name,
-            embedding_model_name=self.config.embedding_model_name,
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
-            fact_candidate_k=self.config.fact_candidate_k,
-            support_candidate_k=self.config.support_candidate_k,
-            claim_candidate_k=self.config.claim_candidate_k,
-            fact_similarity_threshold=self.config.fact_similarity_threshold,
-            claim_similarity_threshold=self.config.claim_similarity_threshold,
-            embedding_batch_size=self.config.embedding_batch_size,
-            max_induced_claims_per_fact=self.config.max_induced_claims_per_fact,
-        )
+    @staticmethod
+    def _message(message: Message, session_id: str | None) -> InputMessage:
+        # metadata 不整体转发；图像描述是唯一明确允许的附加输入。
+        text = message.content
+        if message.metadata.get("blip_caption"):
+            text += f"\n[Image caption: {message.metadata['blip_caption']}]"
+        return InputMessage(message_id=message.id, conversation_id=session_id,
+                            content=text, speaker=message.name, role=message.role,
+                            mention_time=message.timestamp)
 
     def add_message(self, message: Message, **kwargs: Any) -> None:
-        session_id = kwargs.get("session_id")
-        if session_id != self._current_session_id:
-            self.flush()
-            self._current_session_id = session_id
-            self._message_index = 0
-        self._message_buffer.append(message)
-        if len(self._message_buffer) >= self.config.message_batch_size:
-            self.flush()
+        self.add_messages([message], **kwargs)
 
     def add_messages(self, messages: list[Message], **kwargs: Any) -> None:
-        for message in messages:
-            self.add_message(message, **kwargs)
+        policy = InputPolicy.model_validate(kwargs["input_policy"]) if kwargs.get("input_policy") is not None else None
+        self.system.ingest([self._message(m, kwargs.get("session_id")) for m in messages],
+                           namespace=self.config.user_id, input_policy=policy)
+
+    def flush(self) -> str:
+        return self.system.flush(namespace=self.config.user_id)
 
     def retrieve(self, query: str, k: int = 10, **kwargs: Any) -> list[MemoryEntry]:
-        self.flush()
-        return self.system.retrieve(query, k)
+        if k < 1:
+            raise ValueError("k must be positive")
+        snapshot_id = kwargs.get("snapshot_id") or self.flush()
+        prepared = self.system.prepare_evidence(query, namespace=self.config.user_id,
+                                                snapshot_id=snapshot_id,
+                                                query_time=kwargs.get("query_time"))
+        # k 限制返回条目数，不截断必要路径；完整证据作为一条上下文返回。
+        if not prepared.context:
+            return []
+        return [MemoryEntry(content=prepared.context, formatted_content=prepared.context,
+                            metadata={"snapshot_id": snapshot_id,
+                                      **prepared.model_dump(mode="json", exclude={"context"})})]
 
     def delete(self, memory_id: str) -> bool:
-        fact = self.system.fact_store.get_fact(memory_id)
-        self.system.claim_memory.retract_fact(fact.id)
+        self.system.delete(memory_id, namespace=self.config.user_id)
         return True
 
     def update(self, memory_id: str, **kwargs: Any) -> bool:
-        return False
-
-    def save_memory(self) -> None:
+        """修改必须带真实来源；不允许凭一个新字符串直接改写已保存事实。"""
+        message = kwargs.get("source_message")
+        if not isinstance(message, Message):
+            raise ValueError("update requires source_message: Message with the actual correction/update")
+        namespace = self.config.user_id
+        store = self.system.get_store(namespace)
+        target = store.get_version(memory_id)
+        session_id = kwargs.get("session_id")
+        self.add_message(message, session_id=session_id, input_policy=kwargs.get("input_policy"))
         self.flush()
-        self.system.save(self._memory_path())
-
-    def flush(self) -> None:
-        if not self._message_buffer:
-            return
-        self.system.ingest(
-            self._message_buffer,
-            session_id=self._current_session_id,
-            message_offset=self._message_index,
-        )
-        self._message_index += len(self._message_buffer)
-        self._message_buffer.clear()
-
-    def load_memory(self, user_id: str | None = None) -> bool:
-        user_id = user_id or self.config.user_id
-        path = self._memory_path(user_id)
-        if not path.exists():
-            return False
-        self.system = OurMemSystem.load(
-            path=path,
-            model_name=self.config.model_name,
-            embedding_model_name=self.config.embedding_model_name,
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
-            fact_candidate_k=self.config.fact_candidate_k,
-            support_candidate_k=self.config.support_candidate_k,
-            claim_candidate_k=self.config.claim_candidate_k,
-            fact_similarity_threshold=self.config.fact_similarity_threshold,
-            claim_similarity_threshold=self.config.claim_similarity_threshold,
-            embedding_batch_size=self.config.embedding_batch_size,
-            max_induced_claims_per_fact=self.config.max_induced_claims_per_fact,
-        )
-        self._current_session_id = None
-        self._message_index = 0
+        conversation = _opaque("conversation", namespace, session_id or "")
+        message_id = _opaque("message", conversation, message.id)
+        source = next(s for s in store.sources() if s.conversation_id == conversation and s.message_id == message_id)
+        family = {v.id for v in store.versions(memory_key=target.memory_key)}
+        if not any(d.target_version_id in family and any(ref.type == "SOURCE" and ref.id == source.id for ref in d.premise_refs)
+                   for d in store.dependencies()):
+            raise ValueError("The supplied source was not successfully coordinated into the requested memory family")
         return True
 
-    def _memory_path(self, user_id: str | None = None) -> Path:
-        return Path(self.config.save_dir) / f"{user_id or self.config.user_id}.json"
+    def save_memory(self) -> None:
+        self.flush()  # SQLite 已持续写入；这里只完成剩余批次和可读取快照。
+
+    def load_memory(self, user_id: str | None = None) -> bool:
+        namespace = user_id or self.config.user_id
+        if not self.system.database_path(namespace).is_file():
+            return False
+        self.system.get_store(namespace)  # 同时核对配置和数据库版本。
+        self.config = self.config.model_copy(update={"user_id": namespace})
+        return True
+
+    def close(self) -> None:
+        self.system.close()

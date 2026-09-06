@@ -1,301 +1,233 @@
-"""OurMem 最基础的记忆数据结构（data structure）。
-
-当前文件描述 OurMem 已经实现的基础对象：
-
-1. 来源证据（source evidence）：从原始对话中摘录、直接支持某条事实的原文；
-2. 原子事实（atomic fact）：从对话中抽取、能够独立变化的最小事实单元。
-
-可以把它们想象成读书时的“荧光笔标记”和“事实卡片”：
-
-- 来源证据（source evidence）是事实卡片背面保留的原文与出处；
-- 原子事实（atomic fact）是根据原文整理出的卡片；
-- 卡片内容被纠正时，不擦掉旧卡片，而是增加新卡片并保留版本关系。
-
-派生主张（derived claim）不伪装成用户原话，而是通过成立依据
-（justification）递归指向原子事实（atomic fact）及其来源证据
-（source evidence）。
-"""
+"""统一保存原文、记忆内容与支持关系；事实和结论不再使用两套生命周期。"""
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-def _new_id(prefix: str) -> str:
-    """生成便于人眼识别的随机标识。"""
-
-    return f"{prefix}-{uuid4()}"
+def new_id(prefix: str) -> str:
+    return f"{prefix}-{uuid4().hex}"
 
 
-class FactStatus(str, Enum):
-    """原子事实（atomic fact）在当前记忆中的状态。
-
-    这里仅描述生命周期状态（lifecycle status），不描述事实内容是否确定。
-    例如“会议可能改到周六，但尚未确认”本身可以是一条 ``ACTIVE`` 的
-    原子事实（atomic fact），因为不确定语义（uncertain semantics）已经包含
-    在 ``content`` 中。
-
-    ``ACTIVE``
-        当前仍可作为有效事实使用。
-
-    ``SUPERSEDED``
-        已经被更新版本替代。旧事实仍然保留，用于历史查询和证据追溯。
-
-    ``RETRACTED``
-        信息提供者明确撤回了这条事实。撤回不等于删除，原始记录仍然存在。
-
-    """
-
-    ACTIVE = "active"
-    SUPERSEDED = "superseded"
-    RETRACTED = "retracted"
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-class OurMemModel(BaseModel):
-    """OurMem 数据模型（data model）的共同基础配置。
-
-    禁止未声明字段，避免把拼错的字段静默写入持久化数据。
-    """
-
+class Record(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class SourceEvidence(OurMemModel):
-    """内嵌在原子事实（atomic fact）中的直接来源。
+class TimePoint(Record):
+    """真实日期或输入顺序位置；before 表示变化发生之前的边界。"""
 
-    来源证据（source evidence）不是系统总结，也不是系统推断。它表示：
-    “原始对话中的这一段文字，是某条原子事实（atomic fact）的直接来源。”
-
-    一条消息可以产生多条来源证据（source evidence），例如：
-
-    ``父亲不能走太远，母亲不吃辣。``
-
-    可以分别截取 ``父亲不能走太远`` 和 ``母亲不吃辣``，从而支持两条能够
-    独立更新的原子事实（atomic fact）。
-    """
-
-    message_id: str = Field(
-        min_length=1,
-        description="该片段来自哪一条 MemBase 消息。",
-    )
-    session_id: str | None = Field(
-        default=None,
-        description=(
-            "该消息所在的会话标识。调用方暂时无法提供时可以为空。"
-        ),
-    )
-    message_index: int | None = Field(
-        default=None,
-        ge=0,
-        description=(
-            "该消息（message）在所属会话（session）中的顺序位置，从 0 开始。它不表示"
-            "由用户消息和助手消息组成的交互轮（exchange）；暂时无法获得时可以为空。"
-        ),
-    )
-    speaker: str = Field(
-        min_length=1,
-        description="原始文本的说话者。",
-    )
-    quote: str = Field(
-        min_length=1,
-        description="真正支持事实的原始文本片段，而不是系统生成的摘要。",
-    )
-    timestamp: str = Field(
-        min_length=1,
-        description="这段原始文本在对话中被提及的时间。",
-    )
-
-
-class AtomicFact(OurMemModel):
-    """能够被独立更新的最小事实单元。
-
-    原子事实（atomic fact）像一张带出处的事实卡片。例如：
-
-    ``Hotel A 距离地铁站约 200 米``
-
-    当用户后来纠正为 2 公里时，不直接改写这张旧卡片。系统创建一张新卡片，
-    让新原子事实（atomic fact）的 ``supersedes_fact_id`` 指向旧原子事实
-    （atomic fact），同时把旧原子事实（atomic fact）的状态改为
-    ``SUPERSEDED``。这样当前状态和历史状态都不会丢失。
-    """
-
-    id: str = Field(
-        default_factory=lambda: _new_id("fact"),
-        min_length=1,
-        description="原子事实（atomic fact）的唯一标识。",
-    )
-    content: str = Field(
-        min_length=1,
-        description="事实本身的自然语言表达，一条记录尽量只表达一个可独立变化的事实。",
-    )
-    # 是否保留，待定
-    entities: list[str] = Field(
-        default_factory=list,
-        description="事实涉及的人物、地点、物品或其他实体，用于后续定位相关记忆。",
-    )
-    source: SourceEvidence = Field(
-        description="直接支持这条事实的原始文本与出处。",
-    )
-    mention_time: str = Field(
-        min_length=1,
-        description=(
-            "事实在对话中被提及的时间，通常等于来源证据的时间戳，并作为事实的"
-            "直接时间字段保留。"
-        ),
-    )
-    event_time: str | None = Field(
-        default=None,
-        description=(
-            "事实真实发生的时间。例如，用户今天提到去年的旅行，提及时间（mention time）"
-            "是今天，事件时间（event time）是去年。无法可靠判断时保持为空。"
-        ),
-    )
-    status: FactStatus = Field(
-        default=FactStatus.ACTIVE,
-        description="原子事实（atomic fact）当前有效、已被替代或已被撤回。",
-    )
-    supersedes_fact_id: str | None = Field(
-        default=None,
-        description=(
-            "如果这是一条修正后的新事实，这里指向被它替代的旧原子事实"
-            "（atomic fact）。普通新增事实保持为空。"
-        ),
-    )
-    retraction_source: SourceEvidence | None = Field(
-        default=None,
-        description="明确撤回这条事实的后续原文与出处。",
-    )
-
-    @field_validator("entities")
-    @classmethod
-    def _deduplicate_list_values(cls, values: list[str]) -> list[str]:
-        """去除重复值，同时保留第一次出现的顺序。"""
-
-        if any(not value.strip() for value in values):
-            raise ValueError("列表中不能包含空字符串")
-        return list(dict.fromkeys(values))
-
-
-class FactUpdateAction(str, Enum):
-    """新原子事实（atomic fact）相对当前事实产生的版本操作。"""
-
-    ADD = "add"
-    DUPLICATE = "duplicate"
-    SUPERSEDE = "supersede"
-    RETRACT = "retract"
-
-
-class FactUpdate(OurMemModel):
-    """事实协调器（fact reconciler）输出的确定性操作。"""
-
-    action: FactUpdateAction
-    target_fact_id: str | None = Field(default=None, min_length=1)
+    date: str | None = None
+    order: int | None = Field(default=None, ge=0)
+    offset: int = Field(default=0, ge=0)
+    side: Literal["before", "at", "after"] = "at"
 
     @model_validator(mode="after")
-    def _validate_target(self) -> FactUpdate:
-        if self.action is FactUpdateAction.ADD:
-            if self.target_fact_id is not None:
-                raise ValueError("ADD cannot have a target fact")
-        elif self.target_fact_id is None:
-            raise ValueError(f"{self.action.value.upper()} requires a target fact")
+    def validate_date(self) -> TimePoint:
+        if self.date is not None:
+            datetime.fromisoformat(self.date.replace("Z", "+00:00"))
         return self
 
 
-class ClaimKind(str, Enum):
-    """首版派生主张（derived claim）的两种层次。"""
+class TimeScope(Record):
+    """事件发生期不是知识的保质期；状态才会因其适用期结束而到期。"""
 
-    STATE = "state"
-    DECISION = "decision"
-
-
-class ClaimPolarity(str, Enum):
-    """主张值是肯定还是否定。"""
-
-    POSITIVE = "positive"
-    NEGATIVE = "negative"
+    kind: Literal["state", "event", "unknown"] = "unknown"
+    start: TimePoint | None = None
+    end: TimePoint | None = None
+    precision: Literal["second", "minute", "day", "month", "year", "order", "unknown"] = "unknown"
+    text: str | None = None
 
 
-class ClaimStatus(str, Enum):
-    """派生主张（derived claim）当前是否仍被其唯一依据支持。"""
+class SourceSpan(Record):
+    """程序定位的原文半开区间 [start, end)，不是模型猜测的坐标。"""
 
-    VALID = "valid"
-    INVALID = "invalid"
+    source_id: str
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def valid_range(self) -> SourceSpan:
+        if self.end <= self.start:
+            raise ValueError("A source span must have end > start")
+        return self
 
 
-class JustificationStatus(str, Enum):
-    """成立依据（justification）的生命周期状态。"""
+class ReferenceType(str, Enum):
+    SOURCE = "SOURCE"
+    CURRENT = "CURRENT"
+    HISTORICAL = "HISTORICAL"
 
+
+class PremiseRef(Record):
+    type: ReferenceType
+    id: str
+    span: SourceSpan | None = None
+    context_refs: list[SourceSpan] = Field(default_factory=list)
+    at_time: TimePoint | None = None
+
+    @model_validator(mode="after")
+    def reference_shape(self) -> PremiseRef:
+        if self.type is ReferenceType.SOURCE:
+            if self.span is None or self.span.source_id != self.id:
+                raise ValueError("SOURCE requires a matching source span")
+            if self.at_time is not None:
+                raise ValueError("SOURCE does not use at_time")
+        elif self.span is not None or self.context_refs:
+            raise ValueError("Memory references do not carry source spans")
+        if self.type is ReferenceType.HISTORICAL and (self.at_time is None or
+                self.at_time.date is None and self.at_time.order is None):
+            raise ValueError("HISTORICAL requires an explicit time or order boundary")
+        if self.type is ReferenceType.CURRENT and self.at_time is not None:
+            raise ValueError("CURRENT is evaluated at the caller's time")
+        return self
+
+
+class InputMessage(Record):
+    """适配层白名单输入：刻意没有可混入标准答案的任意 metadata 字段。"""
+
+    message_id: str
+    content: str
+    speaker: str = "user"
+    role: Literal["user", "assistant", "system", "tool"] = "user"
+    conversation_id: str | None = None
+    mention_time: str | None = None
+    source_order: int | None = Field(default=None, ge=0)
+    generation_refs: list[PremiseRef] = Field(default_factory=list)
+
+
+class Source(Record):
+    id: str = Field(default_factory=lambda: new_id("src"))
+    namespace: str
+    message_id: str
+    content: str
+    speaker: str
+    role: Literal["user", "assistant", "system", "tool"] = "user"
+    conversation_id: str | None = None
+    source_order: int = Field(ge=0)
+    mention_time: str | None = None
+    generation_refs: list[PremiseRef] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now)
+
+
+class InputPolicy(Record):
+    """公开输入约定；不含任务类别、标准答案或标准依赖图。"""
+
+    update_priority: Literal["explicit", "newer_source"] = "explicit"
+    control_roles: list[str] = Field(default_factory=lambda: ["user"])
+    description: str = ""
+
+
+class MemoryStatus(str, Enum):
     ACTIVE = "active"
-    INVALID = "invalid"
+    STALE = "stale"
     SUPERSEDED = "superseded"
+    DELETED = "deleted"
 
 
-class ClaimValue(OurMemModel):
-    """不包含时间范围的规范主张值。"""
-
-    proposition: str = Field(
-        min_length=1,
-        description="主张在当前身份下表达的规范值。",
-    )
-    polarity: ClaimPolarity = Field(
-        default=ClaimPolarity.POSITIVE,
-        description="主张值的肯定或否定极性。",
-    )
+class Revision(Record):
+    previous_version_id: str
+    reason: Literal["update", "correction", "reconfirmation", "override"]
+    effective_time: TimePoint | None = None
+    evidence_refs: list[PremiseRef] = Field(min_length=1)
 
 
-class ClaimClause(OurMemModel):
-    """一条成立依据（justification）支持的规范结论。"""
-
-    value: ClaimValue
-
-
-class ClaimVersion(OurMemModel):
-    """派生主张（derived claim）对外语义的一次不可变版本。"""
-
-    id: str = Field(
-        default_factory=lambda: _new_id("claim-version"),
-        min_length=1,
-    )
-    claim_key: str = Field(
-        min_length=1,
-        description="派生主张（derived claim）的稳定语义身份。",
-    )
-    kind: ClaimKind
-    clause: ClaimClause
-    status: ClaimStatus
-    materialized_from_justification_id: str = Field(min_length=1)
-    supersedes_version_id: str | None = None
+class MemoryVersion(Record):
+    id: str = Field(default_factory=lambda: new_id("mem"))
+    namespace: str
+    memory_key: str = Field(default_factory=lambda: new_id("key"))
+    content: str = Field(min_length=1)
+    valid_time: TimeScope = Field(default_factory=TimeScope)
+    modality: Literal["asserted", "uncertain", "planned", "conditional", "hypothetical"] = "asserted"
+    created_at: str = Field(default_factory=utc_now)
+    revision: Revision | None = None
+    status: MemoryStatus = MemoryStatus.ACTIVE
 
 
-class Justification(OurMemModel):
-    """一组直接支持如何共同推出一条派生主张（derived claim）。
+class DependencyEffect(str, Enum):
+    SUPPORT = "SUPPORT"
+    INVALIDATE = "INVALIDATE"
 
-    ``support_version_ids`` 可以引用原子事实（atomic fact）版本，也可以引用
-    当前派生主张（derived claim）版本。派生来源最终沿这些引用展开到原始证据，
-    因此这里不重复保存伪造的原文片段。
-    """
 
-    id: str = Field(
-        default_factory=lambda: _new_id("justification"),
-        min_length=1,
-    )
-    conclusion_key: str = Field(min_length=1)
-    conclusion_kind: ClaimKind
-    support_version_ids: list[str] = Field(min_length=2, max_length=3)
-    explicit_defeater_version_ids: list[str] = Field(default_factory=list)
-    clause: ClaimClause
-    status: JustificationStatus = JustificationStatus.ACTIVE
-    supersedes_justification_id: str | None = None
+class DependencyLink(Record):
+    id: str = Field(default_factory=lambda: new_id("dep"))
+    namespace: str
+    premise_refs: list[PremiseRef] = Field(min_length=1)
+    effect: DependencyEffect = DependencyEffect.SUPPORT
+    target_version_id: str
+    effective_time: TimePoint | None = None
+    created_at: str = Field(default_factory=utc_now)
 
-    @field_validator(
-        "support_version_ids",
-        "explicit_defeater_version_ids",
-    )
-    @classmethod
-    def _deduplicate_version_ids(cls, values: list[str]) -> list[str]:
-        if len(values) != len(set(values)):
-            raise ValueError("Version references cannot contain duplicates")
-        return values
+
+class ControlOperation(Record):
+    """追加式控制动作；关闭、撤回和删除不改写旧内容。"""
+
+    id: str = Field(default_factory=lambda: new_id("op"))
+    namespace: str
+    kind: Literal["close", "supersede", "correct", "retract", "delete", "conflict", "resolve_conflict", "pending", "resolve_pending", "revoke_control"]
+    target_id: str
+    scope: Literal["version", "key", "source", "span", "dependency", "operation"] = "version"
+    span: SourceSpan | None = None
+    effective_time: TimePoint | None = None
+    evidence_refs: list[PremiseRef] = Field(default_factory=list)
+    reason: str = ""
+    topic: str = ""
+    replacement_id: str | None = None
+    source_cutoff: int | None = None
+    created_at: str = Field(default_factory=utc_now)
+
+
+class Snapshot(Record):
+    id: int
+    namespace: str
+    source_cutoff: int
+    sequence: int
+    maintenance_incomplete: bool = False
+    created_at: str = Field(default_factory=utc_now)
+
+
+class Resolution(Record):
+    version_id: str
+    usable: bool
+    status: MemoryStatus
+    reason: str = ""
+    support_ids: list[str] = Field(default_factory=list)
+
+
+class EvidenceBundle(Record):
+    """完整支持路径展开；超限时不将半条路径伪装成完整证据。"""
+
+    text: str = ""
+    refs: list[PremiseRef] = Field(default_factory=list)
+    version_ids: list[str] = Field(default_factory=list)
+    complete: bool = True
+    reason: str = ""
+
+
+class PreparedContext(Record):
+    context: str = ""
+    resolution_status: Literal["resolved", "unknown", "conflict", "deleted", "incomplete"] = "incomplete"
+    reason: str = ""
+    evidence_refs: list[PremiseRef] = Field(default_factory=list)
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    read_trace: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AnswerResult(PreparedContext):
+    answer_text: str
+
+
+class MaintenanceReport(Record):
+    changed_ids: list[str] = Field(default_factory=list)
+    pending_ids: list[str] = Field(default_factory=list)
+    results: list[dict[str, Any]] = Field(default_factory=list)
+    generation_calls: int = 0
+    incomplete: bool = False
