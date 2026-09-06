@@ -13,6 +13,14 @@
 /examples/evaluate_ourmem_on_*/api_config.json
 /examples/evaluate_ourmem_on_*/local_config.json
 
+# 本地测试与试跑示例，不随核心代码提交。
+/tests/
+/examples/ourmem/
+
+# 旧版设计草稿；正式的 V5 文档仍正常跟踪。
+/docs/pipeline_v[1-4].md
+/docs/tmp.md
+
 ### Linux ###
 *~
 
