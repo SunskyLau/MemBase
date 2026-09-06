@@ -39,11 +39,17 @@
 
 同一个 `RUN_ID` 只复用完整且配置、数据和源码一致的阶段。修改方法、提示词或参数后使用新的 `RUN_ID`，不能混合新旧结果。MEME 的变化前回答只能来自变化前快照。
 
-三阶段入口是根目录的 `memory_construction.py`、`memory_search.py`、`memory_evaluation.py`，实际逻辑复用 `ConstructionRunner`、`SearchRunner`、`EvaluationRunner`。`scripts/run_benchmark.py` 只串联阶段；公共协议上下文处理配置、并发与产物校验。数据通过原注册机制接入，官方白名单与评分工具分别位于 `membase/datasets/official.py` 和 `membase/evaluation/official.py`。六个官方基线仍保留原生执行，只统一公共启动与日志。
+三阶段入口是根目录的 `memory_construction.py`、`memory_search.py`、`memory_evaluation.py`，实际逻辑复用 `ConstructionRunner`、`SearchRunner`、`EvaluationRunner`。`scripts/run_benchmark.py` 只串联阶段；公共协议上下文处理配置、并发与产物校验。数据通过原注册机制接入，官方白名单与评分工具分别位于 `membase/datasets/official.py` 和 `membase/evaluation/official.py`。MAB 的 A-MEM 对照复用这三个运行器；六个官方原生基线仍保留原有执行方式。
+
+共享调用器和请求账本位于 `membase/inference_utils/model_client.py`；本目录的 `llm.py` 只保留原公开导入入口。A-MEM 不调用 OurMem 的抽取、协调、派生或读取规划。
 
 本次没有跨运行缓存，也不迁移旧 V5 运行；请选择新的 `RUN_ID`。同一新格式运行中的完整阶段可复用，数据库存在但缺少完成记录时仍需继续处理。
 
+派生、验证和派生协调的可恢复模型错误在有限重试后登记未完成范围，无效关系不入库；底层事实和索引的技术错误仍阻断相关样本。公共运行器会隔离单题检索、回答、评分故障，将其明确标为技术失败并计零，分母不变；同一运行不重复尝试这些终态题。流程结束但存在技术失败或维护缺口时使用 `complete_with_warnings`。具体完成条件、MEME 观察点和结果字段见[失败处理说明](../../examples/README_experiments.md#局部失败与成绩含义)。
+
 ## 验证与预算
+
+上下文按完整实际请求计算，包括提示、输出结构定义、当前事实和全部候选证据；协调请求不重复发送候选版本列表。已删除原先固定预留 4,000 词元的估算，纠错空间按配置的最大输出长度及有界错误说明计算。超长错误说明可以缩短，但必要事实和支持路径不能截成半份。本次不调整派生次数、读取轮数、五层深度和显式请求总量上限；不可拆分的必要证据仍无法容纳时会明确报告，而不是伪装成成功。
 
 在 `membase-ourmem` 环境、仓库根目录运行 `python -m unittest discover -s tests -q`，执行离线回归；不会请求模型。必需依赖固定在 `envs/ourmem_requirements.txt`，官方代码和数据检查由 `scripts/prepare_benchmarks.py` 负责。
 
