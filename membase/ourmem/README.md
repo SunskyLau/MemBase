@@ -1,62 +1,74 @@
-# OurMem V5：代码导航与运行
+# OurMem：实现与运行
 
-这里是在原有 OurMem 上迁移的实现；设计依据是 [pipeline_v5.md](../../docs/pipeline_v5.md)。旧实验产物保持不变，新运行从原始消息重建，不读取旧记忆格式。
+OurMem 保留来源（Source）、记忆版本（MemoryVersion）和依赖关系（DependencyLink）三类核心记录。事实与派生结论共用版本机制；来源真实、引用明确、删除隔离和禁止循环自证是程序边界，记忆内容和结构由实际输入与模型归纳形成。
 
-## 从底层到上层阅读
+## 一次输入怎样处理
 
-| 文件 | 负责什么 |
-| --- | --- |
-| `models.py` | 来源、记忆版本、依赖、控制操作、时间及回答结果的数据约定。 |
-| `persistence.py`、`store.py` | SQLite 事务、追加记录、处理进度、读取快照和向量缓存。每个独立样本一个文件。 |
-| `maintenance.py` | 判断当前或历史记忆能否使用，展开完整证据，处理多路径、关闭、纠错、删除及依赖传播。 |
-| `retriever.py` | NumPy 精确向量排序、BM25 稀疏检索、时间候选融合及原文分页。先执行可见性过滤，再选候选。 |
-| `llm.py`、`tokenization.py` | 共用模型调用、输出校验、至多两次额外重试、请求预算、日志和词元统计。 |
-| `extractor.py`、`reconciler.py` | 抽取并定位原文；结合局部候选决定新增、补充支持、修订或控制操作。 |
-| `inducer.py`、`writer.py` | 生成并验证局部多层依赖，顺序提交来源批次，维护待修复目标。 |
-| `calculation.py`、`evidence_format.py`、`reader.py` | 分解查询、补检、集合扫描、完整证明去重与有原文依据的数值计算；不写回语义记忆。 |
-| `system.py` | 组装组件，对外提供摄入、刷新、读取和删除接口。 |
+原文先写入 SQLite。每批默认最多 8 条消息；抽取逐项保留合法事实，无法核对的内容保留原文与未决记录。协调模型先比较陈述关系：等价、独立补充、变化、纠错、冲突等；程序再映射到写入动作。涉及归并或替代的候选额外做一次简短的两句对照，不提供前次判断作暗示。兼容补充保持独立，关系未决时不关闭旧事实。标识由程序绑定，未知目标经过一次关系补检，仍不明确则待决。
 
-事实与高层结论共用 `MemoryVersion`。一条 `DependencyLink` 内的前提共同成立；指向同一版本的不同支持关系可以独立成立。依赖绑定具体版本，不随修订自动换成新版本。当前默认最多派生五层。
+每条已确认变化立即重算已知依赖，必要修复使用当时的来源前缀。可选归纳在批末执行，默认最多 8 次生成；没有新结论或预算用完是正常结束，不是维护故障。批内中间变化不被批尾状态覆盖，评测观察点之间不混合输入。
 
-读取时以 `MaintenanceEngine.evaluate(...)` 返回的 `Resolution` 为准，不能用不可变记录中写入时的 `status` 判断现在是否有效；时间、支持路径和控制操作共同决定当前状态。
+可选归纳与必要修复使用不同提示及输出结构。归纳重点是比较、条件应用和有范围的概括；无提案时保存简短原因（no_op_reason），不强制产生主张。公开更新策略按实际输入提供，不在普通对话中默认启用新来源覆盖规则。两句复核的请求计入 reconcile_check 阶段的实际成本。
 
-正常使用顺序是 `ingest(...) → flush(...) → answer(...)`。`flush` 返回绑定命名空间的快照标识；`prepare_evidence(...)` 只准备证据，让评测运行器继续使用官方回答模板。技术失败不会发布一个假装处理完成的快照；语义处理预算耗尽则明确保留未完成状态。
+每条充分支持路径独立验证、提交。或关系（OR）的一条路径失败，不阻挡其他路径；与关系（AND）的必要前提不能截断。验证可对新结论做一次有依据的范围或条件修订。主张、关系数量是分批容量，不因超额拒绝整份结果；单条前提不设固定数量上限，完整路径默认最多五层。
 
-参数集中在 [`membase/configs/ourmem.py`](../configs/ourmem.py)。提示词为英文，证据和记忆内容沿用来源语言。数据库和日志保留原文，属于实验数据，不应公开提交。
+每条依赖本身就是一组共同前提。验证模型只判断整组是否充分，不再输出前提索引或将其重新拆成多个路径；程序保留全部已核对前提。多条独立支持在派生提案中分别表达，仍保留多路径能力。
 
-## 四个实验入口
+只有实际内容、支持或可用状态变化才继续传播。普通召回不触发旧决定复核；复核依据变化或新证据时，不允许旧来源绕过公开的新来源优先规则。来源修正、撤回与删除仍有不同语义。
 
-入口已统一到 `examples/evaluate_ourmem_on_<数据集>/`，其中有无密钥的 `run.example.sh` 和三个阶段脚本。复制为同目录已忽略的 `run.sh` 后填写配置；`./run.sh --dry-run` 核对范围，`./run.sh` 一键调用原三阶段运行器。详见 [统一实验流程](../../examples/README_experiments.md)。
+## 读取与故障
 
-| 目录（相对仓库根目录） | 范围与评分 |
-| --- | --- |
-| `examples/evaluate_ourmem_on_locomo/` | 第 1～4 类问题；官方分类评分，额外模型评判单独报告。 |
-| `examples/evaluate_ourmem_on_longmemeval/` | LongMemEval-S 清洗版本；官方回答判分及分类汇总。 |
-| `examples/evaluate_ourmem_on_memoryagentbench/` | 主要范围为 6k、32k 单跳与多跳共 400 题；官方子串匹配。 |
-| `examples/evaluate_ourmem_on_meme/` | 无填充、32k、128k 版本；变化前后分别提问，官方六类任务判分与平凡通过过滤。 |
+接口保持：
 
-`MODE` 选择 `smoke`、`core` 或 `full`。冒烟模式只减少样本及问题，不悄悄截短这些问题对应的历史。输出保存在各目录 `runs/<RUN_ID>/`，包括配置与源码指纹、每样本 SQLite、回答、证据、调用日志、成本及评分。
+```python
+ingest(messages, namespace, input_policy)
+flush(namespace, source_cutoff) -> snapshot_id
+answer(query, namespace, snapshot_id, query_time) -> AnswerResult
+```
 
-同一个 `RUN_ID` 只复用完整且配置、数据和源码一致的阶段。修改方法、提示词或参数后使用新的 `RUN_ID`，不能混合新旧结果。MEME 的变化前回答只能来自变化前快照。
+快照（snapshot）固定已提交记忆及相关未决记录。读取显式使用公开输入规则；规划或辅助判断失败时，保留已取得的合法证据并记录降级状态。删除过滤仍覆盖原文、历史、证据展开与降级读取。正式回答和评分继续使用各数据集的官方协议。
 
-三阶段入口是根目录的 `memory_construction.py`、`memory_search.py`、`memory_evaluation.py`，实际逻辑复用 `ConstructionRunner`、`SearchRunner`、`EvaluationRunner`。`scripts/run_benchmark.py` 只串联阶段；公共协议上下文处理配置、并发与产物校验。数据通过原注册机制接入，官方白名单与评分工具分别位于 `membase/datasets/official.py` 和 `membase/evaluation/official.py`。MAB 的 A-MEM 对照复用这三个运行器；六个官方原生基线仍保留原有执行方式。
+网络故障与内容纠错分开计数。OurMem 的恢复窗口默认 900 秒，退避 5、15、30、60、120 秒，之后每次 120 秒；单请求不超过剩余窗口和 120 秒。窗口耗尽后保存检查点并暂停。结构纠错最多额外两次，所有真实请求、失败和重试进入账本；SDK 不再自行重试。A-MEM 和官方原生基线的默认恢复行为不变。
 
-共享调用器和请求账本位于 `membase/inference_utils/model_client.py`；本目录的 `llm.py` 只保留原公开导入入口。A-MEM 不调用 OurMem 的抽取、协调、派生或读取规划。
+监控分别展示输入未决、实际待修复目标和可选探索结束次数。它们不是同一种失败。只有获得合法终态的问题才参与对应结果检查；技术失败依照原协议明确计零，分母不变，未完成实验不发布完整准确率。
 
-本次没有跨运行缓存，也不迁移旧 V5 运行；请选择新的 `RUN_ID`。同一新格式运行中的完整阶段可复用，数据库存在但缺少完成记录时仍需继续处理。
+## 模块导航
 
-派生、验证和派生协调的可恢复模型错误在有限重试后登记未完成范围，无效关系不入库；底层事实和索引的技术错误仍阻断相关样本。公共运行器会隔离单题检索、回答、评分故障，将其明确标为技术失败并计零，分母不变；同一运行不重复尝试这些终态题。流程结束但存在技术失败或维护缺口时使用 `complete_with_warnings`。具体完成条件、MEME 观察点和结果字段见[失败处理说明](../../examples/README_experiments.md#局部失败与成绩含义)。
+| 模块 | 作用 |
+|---|---|
+| `models.py`、`store.py`、`persistence.py` | 记录、事务、快照、待决进度与向量缓存 |
+| `extractor.py`、`reconciler.py` | 原文核对、语义协调与内部标识绑定 |
+| `writer.py`、`inducer.py` | 分批归纳、逐路径验证与局部提交 |
+| `maintenance.py`、`retriever.py` | 统一可用性、反向依赖索引、混合检索与缓存 |
+| `reader.py`、`calculation.py` | 需求检索、完整证据、只读推理与确定性计算 |
+| `system.py`、`membase/layers/ourmem.py` | 公共接口与 MemBase 薄适配 |
+| `membase/inference_utils/model_client.py`、`reference_codec.py` | 调用恢复、请求账本和请求内短引用 |
 
-## 验证与预算
+参数位于 `membase/configs/ourmem.py`。初始请求不再统一预留 6000 词元的旧输出；重试按实际失败输出和反馈组织。上下文按选中的完整路径展开，进度更新不重建语义视图，稀疏索引和向量按数据变化复用。
 
-上下文按完整实际请求计算，包括提示、输出结构定义、当前事实和全部候选证据；协调请求不重复发送候选版本列表。已删除原先固定预留 4,000 词元的估算，纠错空间按配置的最大输出长度及有界错误说明计算。超长错误说明可以缩短，但必要事实和支持路径不能截成半份。本次不调整派生次数、读取轮数、五层深度和显式请求总量上限；不可拆分的必要证据仍无法容纳时会明确报告，而不是伪装成成功。
+## 验证与启动
 
-在 `membase-ourmem` 环境、仓库根目录运行 `python -m unittest discover -s tests -q`，执行离线回归；不会请求模型。必需依赖固定在 `envs/ourmem_requirements.txt`，官方代码和数据检查由 `scripts/prepare_benchmarks.py` 负责。
+从项目根目录 `/home/jovyan/agent-memory/MemBase` 执行离线检查：
 
-`scripts/validate_ourmem.py` 用独立构造的小场景验证初始回答、状态更新和删除。验证产物位于 `experiments/ourmem_validation/runs/v5_acceptance/`。其所有尝试共用 `request_budget.sqlite3`：累计最多 100 次语言模型请求和 20 次嵌入请求，包含重试及评判，不能通过换尝试名称重置。
+```bash
+/home/jovyan/my-conda-envs/membase-ourmem/bin/python -m unittest discover -s tests -q -b
+/home/jovyan/my-conda-envs/membase-ourmem/bin/python scripts/validate_ourmem_reliability.py
+```
 
-本轮实际通过与未完成项见 [验证记录](../../experiments/ourmem_validation/README.md)。`--real-data-extraction` 仅检查首批真实消息的抽取接入，不是完整历史上的基准问答。
+第二条只显示独立合成验证计划，不调用接口。显式添加 `--real` 才调用模型，接口凭据通过环境变量提供。所有尝试共用 `experiments/ourmem_validation/reliability/budget.sqlite`，总上限为 30 次语言模型请求、10 次嵌入请求，包含失败和重试；不能换尝试名重置上限。
 
-正式入口默认不限制请求总数，不能把冒烟测试误当成廉价的几次调用。若要限制，设置脚本顶部两个请求上限；跨运行限制需同时指定相同的 `BUDGET_LEDGER`。任一上限达到即停止，不静默丢掉失败样本。
+6k 单跳与多跳共 200 题的入口可从任何目录预演：
 
-离线回归验证程序规则；小场景验证实际模型是否遵守协议；四个数据集的准确率、成本及论文结论仍需要正式实验。完成某一种验证不代表另外两种也已经完成。
+```bash
+/home/jovyan/agent-memory/MemBase/examples/evaluate_ourmem_on_memoryagentbench/run_6k.sh --dry-run
+```
+
+不加 `--dry-run` 才启动付费实验。其余四数据集入口继续使用公共构建、检索、评测三阶段。旧数据库和实验结果原样保留；新存储格式为 `ourmem-v5-3`，不迁移旧记忆，正式实验需要新运行名称。方法配置和纯运行配置分别记录；本轮不提供跨运行记忆缓存。
+
+历史设计文档保持不变；这里描述当前代码。离线规则通过不等于真实模型永不出错，合成场景通过也不等于正式基准准确率已经验证。具体小额验证结果以实际产物为准。
+
+本次小额验证未全部通过：14 次语言模型请求、10 次嵌入请求后达到额度边界；发现一次语义误归并，尚未验证真实多层派生和最终问答。详见 [验证记录](../../experiments/ourmem_validation/reliability/README.md)。不要将入口已就绪理解为正式实验效果已验证。
+
+随后针对误归并新增了关系比较与归纳提示分离。独立组件验证入口为 `scripts/validate_ourmem_semantics.py`：不加参数只显示计划，显式 `--real` 使用另行授权的最多 6 次语言模型请求，不调用嵌入。它不修改之前的 30/10 账本，也不代表完整端到端或正式基准测试；结果保存在 `experiments/ourmem_validation/semantic_admission/`。
+
+该组件验证已使用 6 次请求：规则与距离并存、明确纠错及派生生成通过；发现验证器误拆共同前提后，改为程序保留整组，并通过原响应离线回放。最新验证提示未再在线测试，详见 [组件验证与审计](../../experiments/ourmem_validation/semantic_admission/README.md)。
