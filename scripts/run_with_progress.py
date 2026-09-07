@@ -160,7 +160,10 @@ def main() -> int:
     location = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     location.add_argument("--output-dir", type=Path)
     location.add_argument("--run-id", default="")
+    location.add_argument("--run-dir", type=Path)
     args, _ = location.parse_known_args(remaining)
+    if args.run_dir is not None:
+        return supervise(command, args.run_dir.resolve(), options.progress_interval)
     if args.output_dir is None:
         return subprocess.call(command)  # 由原入口报告缺失参数。
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")

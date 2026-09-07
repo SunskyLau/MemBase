@@ -168,10 +168,11 @@ class ExperimentProgress:
 
     def _model_errors(self) -> list[str]:
         result = []
+        prior_offsets = read_record(self.run_dir / "read_revision.json").get("request_log_offsets", {})
         for path in (self.run_dir / "samples").rglob("requests.jsonl"):
             try:
                 size = path.stat().st_size
-                previous = self.log_offsets.get(path, 0)
+                previous = self.log_offsets.get(path, prior_offsets.get(path.relative_to(self.run_dir).as_posix(), 0))
                 if size == previous:
                     continue
                 with path.open("rb") as stream:

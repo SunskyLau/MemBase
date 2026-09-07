@@ -58,6 +58,15 @@ def question_file(directory: Path, question_id: str):
     return directory / f"{hashlib.sha256(question_id.encode()).hexdigest()[:24]}.json"
 
 
+def protocol_for(config, overrides):
+    return {**fingerprint(config.benchmark, config.data_root, config.upstream_dir),
+            "workflow": PROTOCOL_VERSION,
+            "implementation": (ourmem_fingerprint(official_roots={config.benchmark: config.upstream_dir})
+                               if config.baseline == "ourmem" else method_fingerprint("amem", official_roots={config.benchmark: config.upstream_dir})),
+            "memory_overrides": ({k: v for k, v in overrides.items() if k not in {"request_timeout", "transport_retry_window"}}
+                                 if config.baseline == "ourmem" else overrides)}
+
+
 def preview(config, stages=("construction", "search", "evaluation")):
     # 原始输入保持完整；不导入运行器、模型或创建运行目录。
     from ..datasets.official import load_episodes
@@ -79,12 +88,20 @@ def preview(config, stages=("construction", "search", "evaluation")):
                              "top_k": config.top_k, "max_evidence_tokens": overrides.get("max_evidence_tokens", 8000)}),
               "scoring": "pinned official protocol",
               "execution": {"workers": config.workers, "check_workers": config.check_workers}}
+    if (config.run_dir / "read_revision.json").exists():
+        from ..utils.read_revision import validate_revision
+        saved = read_json(config.run_dir / "config.json")
+        if saved["config"] != config.saved_config():
+            raise ImplementationMismatchError("续跑配置与原运行不一致")
+        revision = validate_revision(config.run_dir, saved, protocol_for(config, overrides), stages)
+        result["reuse_construction"] = {"revision": revision["id"], "samples": sorted(revision["construction"]),
+                                       "memory_unchanged": True, "construction_will_run": False}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
 
 
 class RunContext:
-    def __init__(self, config, *, client=None, layer_factory=None):
+    def __init__(self, config, *, client=None, layer_factory=None, stages=("construction", "search", "evaluation")):
         self.config, self.layer_factory = config, layer_factory
         self.layer_name = {"ourmem": "OurMem", "amem": "A-MEM"}[config.baseline]
         if config.baseline == "amem" and config.benchmark != "memoryagentbench":
@@ -92,24 +109,24 @@ class RunContext:
         self.blocked_samples = set()
         self.stage_failures = []
         self.stop_requested = False
-        protocol = {**fingerprint(config.benchmark, config.data_root, config.upstream_dir),
-                    "workflow": PROTOCOL_VERSION,
-                    "implementation": (ourmem_fingerprint(official_roots={config.benchmark: config.upstream_dir})
-                                       if config.baseline == "ourmem" else method_fingerprint("amem", official_roots={config.benchmark: config.upstream_dir}))}
         self.overrides = read_json(config.memory_config) if config.memory_config else {}
+        protocol = protocol_for(config, self.overrides)
+        self.read_revision = None
         if set(self.overrides) & {"api_key", "api_keys", "base_url", "base_urls", "llm_api_key", "embedding_api_key",
                                  "llm_base_url", "embedding_base_url"}:
             raise ValueError("方法配置不得包含接口凭据")
-        protocol["memory_overrides"] = ({key: value for key, value in self.overrides.items()
-                                          if key not in {"request_timeout", "transport_retry_window"}}
-                                         if config.baseline == "ourmem" else self.overrides)
         path = config.run_dir / "config.json"
         if path.exists():
             saved = read_json(path)
             previous = saved.get("protocol", {})
             if previous.get("workflow") != PROTOCOL_VERSION:
                 raise ImplementationMismatchError("旧运行保持只读；三阶段流程需要新的 RUN_ID")
-            if previous.get("implementation") != protocol["implementation"]:
+            if (config.run_dir / "read_revision.json").exists():
+                from ..utils.read_revision import validate_revision
+                self.read_revision = validate_revision(config.run_dir, saved, protocol, stages)
+                # 原 config.json 继续描述真实的构建版本；读取版本单独记录，不能冒充重建。
+                protocol = {**protocol, "implementation": previous["implementation"]}
+            elif previous.get("implementation") != protocol["implementation"]:
                 raise ImplementationMismatchError("源码内容发生变化，请使用新的 RUN_ID；旧产物不变")
             if saved.get("config") != config.saved_config() or previous != protocol:
                 raise ImplementationMismatchError("RUN_ID 对应的配置不同，请使用新的 RUN_ID；旧产物不变")
@@ -247,6 +264,9 @@ class RunContext:
             raise ValueError("没有选中任何样本")
         if stage == "evaluation" and not self.stage_failures:
             result = summarize(self.config.benchmark, completed)
+            if self.read_revision:
+                result["read_revision"] = {"id": self.read_revision["id"], "construction_reused": True,
+                                           "prior_query_costs_included": True}
             result.update(selected_mode=self.config.mode, request_costs=self.costs())
             finish_run(self.config.run_dir, result)
             return result
@@ -310,7 +330,7 @@ def run(config, *, stages=("construction", "search", "evaluation"), client=None,
     from .construction import ConstructionRunner
     from .search import SearchRunner
     from .evaluation import EvaluationRunner
-    context = RunContext(config, client=client, layer_factory=layer_factory)
+    context = RunContext(config, client=client, layer_factory=layer_factory, stages=stages)
     runners = {"construction": ConstructionRunner, "search": SearchRunner, "evaluation": EvaluationRunner}
     try:
         result = None
