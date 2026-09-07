@@ -30,6 +30,7 @@ _LOCAL_FILES = (
     "membase/inference_utils/operators.py", "membase/inference_utils/backends.py",
     "membase/inference_utils/prompts.py",
     "membase/inference_utils/model_client.py", "membase/utils/tokenization.py",
+    "membase/inference_utils/reference_codec.py",
 )
 
 _OFFICIAL_FILES = {

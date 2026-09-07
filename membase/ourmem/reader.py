@@ -6,9 +6,9 @@ import json
 import re
 from typing import Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
-from .llm import ContextLimitError, OutputLimitError
+from .llm import ContextLimitError, OutputLimitError, RecoverableModelError
 from .models import (
     EvidenceBundle, PremiseRef, PreparedContext, Record, SourceSpan, TimePoint,
 )
@@ -65,6 +65,10 @@ literal numeric_value and unit from evidence (do not pre-convert units). Dates
 for date_difference use ISO values justified by evidence. External assumptions
 must not replace user facts. Do not speculate about hidden benchmark task labels.
 Return at most max_queries next_queries; an empty list means no useful next query.
+Use need_catalog ids for covered_needs/missing_needs. released_ids may remove irrelevant
+previously retained evidence. Apply input_policy; unresolved_inputs are uncoordinated
+source statements, not confirmed updates. They may support read-only reasoning, but
+do not silently present an older value as definitively current.
 For date arithmetic relative to the public query date, use @query_time as an
 item_key. It is supplied by the caller, not a date you may invent.
 For sum/difference/compare, EVERY referenced item must explicitly include a
@@ -82,6 +86,7 @@ requires an explicit, independently permitted new source for that same topic.
 
 
 class ReadPlan(Record):
+    model_config = ConfigDict(extra="ignore")
     needs: list[str] = Field(min_length=1)
     queries: list[str] = Field(min_length=1)
     mode: Literal["current", "history", "source", "aggregate"] = "current"
@@ -109,6 +114,7 @@ class Calculation(Record):
 
 
 class ReadAssessment(Record):
+    model_config = ConfigDict(extra="ignore")
     selected_ids: list[str] = Field(default_factory=list)
     covered_needs: list[str] = Field(default_factory=list)
     missing_needs: list[str] = Field(default_factory=list)
@@ -117,6 +123,7 @@ class ReadAssessment(Record):
     reason: str = ""
     items: list[ReadItem] = Field(default_factory=list)
     calculations: list[Calculation] = Field(default_factory=list)
+    released_ids: list[str] = Field(default_factory=list)
 
 
 def _dump(value) -> str:
@@ -188,6 +195,7 @@ class MemoryReader:
                         version["content"] = "[current value requires an over-budget supporting path]"
             return context, local_refs, local_proofs, complete
         context, refs, proofs, complete = contextualize(source, candidate.span, candidate.text)
+        context["coordination_pending"] = any(item["source_id"] == source.id for item in getattr(self, "_unresolved", []))
         neighbors = []
         conversation = sorted((item for item in view.sources.values()
                                if item.conversation_id == source.conversation_id), key=lambda item: item.source_order)
@@ -201,10 +209,10 @@ class MemoryReader:
             if chunks:
                 chunk = chunks[-1] if index < position else chunks[0]
                 neighbor_context, neighbor_refs, neighbor_proofs, neighbor_complete = contextualize(neighbor, chunk.span, chunk.text)
-                neighbors.append(neighbor_context)
-                refs.extend(neighbor_refs)
-                proofs.extend(neighbor_proofs)
-                complete = complete and neighbor_complete
+                if neighbor_complete:
+                    neighbors.append(neighbor_context)
+                    refs.extend(neighbor_refs)
+                    proofs.extend(neighbor_proofs)
         context["neighbors"] = neighbors
         packet = {"id": candidate.id, "kind": "source", "source": context,
                   "supporting_paths": list(dict.fromkeys(proofs)), "complete": complete}
@@ -223,21 +231,25 @@ class MemoryReader:
         return records
 
     def _assess(self, query, plan, packets, retained, prior, controls, *, scanning=False):
-        payload = {"question": query, "plan": plan, "evidence": packets,
+        needs = {f"n{i}": value for i, value in enumerate(plan.needs)}
+        payload = {"question": query, "plan": plan, "evidence": packets, "need_catalog": needs,
                    "retained_ids": retained, "prior_items": prior.items,
                    "previously_covered": prior.covered_needs,
                    "controls": controls, "exhaustive_scan_in_progress": scanning,
-                   "max_queries": self.config.max_read_queries_per_round}
+                   "max_queries": self.config.max_read_queries_per_round,
+                   "input_policy": self.store.get_progress("system:input_policy") or {},
+                   "unresolved_inputs": [item for item in getattr(self, "_unresolved", [])
+                                         if item["source_id"] in _dump(packets)]}
         known = {item["id"] for item in packets} | set(retained)
         def validate(raw):
             result = ReadAssessment.model_validate(raw)
+            result.covered_needs = [needs.get(n, n) for n in result.covered_needs if n in needs or n in plan.needs]
+            result.missing_needs = [needs.get(n, n) for n in result.missing_needs if n in needs or n in plan.needs]
             ids = result.selected_ids + [record for item in result.items for record in item.evidence_ids]
             if set(ids) - known:
                 raise ValueError("Evidence selection must reference displayed or retained candidate IDs")
-            if set(result.covered_needs + result.missing_needs) - set(plan.needs):
-                raise ValueError("Coverage must refer to the original plan needs")
-            if len(result.next_queries) > self.config.max_read_queries_per_round:
-                raise ValueError("Too many follow-up queries")
+            result.next_queries = result.next_queries[:self.config.max_read_queries_per_round]
+            result.released_ids = [key for key in result.released_ids if key in known]
             if len({item.key for item in result.items}) != len(result.items):
                 raise ValueError("Collection item keys must be unique")
             operands = {item.key: item for item in [*prior.items, *result.items]}
@@ -261,22 +273,30 @@ class MemoryReader:
     def prepare(self, query: str, snapshot_id: int, query_time: str | TimePoint | None = None) -> PreparedContext:
         snapshot = self.store.snapshot(snapshot_id)
         view = self.store.view(snapshot)
+        self._unresolved = self.store.unresolved(snapshot)
         self.retriever._query_cache.clear()
         conversations = list(dict.fromkeys(source.conversation_id for source in view.sources.values()
                                           if source.conversation_id is not None))
         def validate_plan(raw):
             result = ReadPlan.model_validate(raw)
-            if len(result.queries) > self.config.max_read_queries_per_round:
-                raise ValueError("Too many initial retrieval queries")
+            result.queries = result.queries[:self.config.max_read_queries_per_round]
             if result.conversation_id is not None and result.conversation_id not in conversations:
                 raise ValueError("Conversation filter must use the provided catalog")
             return result
-        plan = self.llm.request_json("read_plan", PLAN_PROMPT,
-                                     {"question": query, "query_time": query_time,
-                                      "conversation_ids": conversations,
-                                      "max_queries": self.config.max_read_queries_per_round}, validator=validate_plan)
+        plan_error = None
+        try:
+            plan = self.llm.request_json("read_plan", PLAN_PROMPT,
+                                         {"question": query, "query_time": query_time,
+                                          "conversation_ids": conversations,
+                                          "input_policy": self.store.get_progress("system:input_policy") or {},
+                                          "max_queries": self.config.max_read_queries_per_round}, validator=validate_plan)
+        except RecoverableModelError as error:
+            plan = ReadPlan(needs=[query], queries=[query])
+            plan_error = str(error)
         assessment = ReadAssessment(missing_needs=plan.needs)
         packets, bundles, retained, trace = {}, {}, [], []
+        if plan_error:
+            trace.append({"phase": "read_plan", "degraded": True, "reason": plan_error})
         if query_time is not None:
             public_time = query_time.model_dump(mode="json") if isinstance(query_time, TimePoint) else {"date": query_time}
             packets["@query_time"] = {"id": "@query_time", "kind": "public_query_time", "time": public_time}
@@ -314,6 +334,12 @@ class MemoryReader:
                         "controls": controls, "evidence": kept}
                 size = self.llm.count_tokens(ASSESS_PROMPT) + self.llm.count_tokens(_dump(base)) + 512
                 if size > self.config.max_context_tokens:
+                    if len(retained) > 1:
+                        removed = retained.pop(0)
+                        assessment.items = [item for item in assessment.items if removed not in item.evidence_ids]
+                        assessment.covered_needs = []
+                        trace.append({"phase": "release_evidence", "id": removed, "reason": "context_budget"})
+                        continue
                     assessment_limited = True
                     omitted.extend(pending)
                     break
@@ -347,6 +373,12 @@ class MemoryReader:
                     if not pending:
                         break
                     continue
+                except RecoverableModelError as error:
+                    # 辅助判定失败不丢弃已经可靠取得的证据；仍明确标记覆盖未评估。
+                    usable = [key for key in [*retained, *fresh_ids] if bundles[key].complete]
+                    result = ReadAssessment(selected_ids=usable, missing_needs=plan.needs,
+                                            reason="assessment_unavailable", resolution_status="incomplete")
+                    trace.append({"phase": "read_assess", "degraded": True, "reason": str(error)})
                 processed.update(fresh_ids)
                 processed.update(retained)
                 items = {item.key: item for item in assessment.items}
@@ -354,6 +386,8 @@ class MemoryReader:
                 result.items = list(items.values())
                 retained = list(dict.fromkeys([*retained, *result.selected_ids,
                                                *(record for item in result.items for record in item.evidence_ids)]))
+                retained = [key for key in retained if key not in result.released_ids]
+                result.items = [item for item in result.items if set(item.evidence_ids) <= set(retained)]
                 covered = list(dict.fromkeys([*assessment.covered_needs, *result.covered_needs]))
                 result.covered_needs = [need for need in covered if need not in result.missing_needs]
                 assessment = result
@@ -468,6 +502,7 @@ class MemoryReader:
                                coverage={"needs": plan.needs, "covered": covered,
                                          "assessed_covered": assessment.covered_needs,
                                          "final_evidence_limited": evidence_limited,
+                                         "unresolved_input_count": len(self._unresolved),
                                          "retained_item_keys": [item.key for item in final_items],
                                          "missing": missing, "source_range_exhausted": scan_complete,
                                          "visited_source_ranges": visited, "scan_tokens": scanned_tokens,

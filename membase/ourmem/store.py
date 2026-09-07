@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -55,11 +55,10 @@ class OurMemStore:
 
     def __init__(
         self, path: str | Path, namespace: str, *,
-        max_claim_depth: int = 5, max_premises_per_dependency: int = 8,
+        max_claim_depth: int = 5,
     ) -> None:
         self.path, self.namespace = str(path), namespace
         self.max_claim_depth = max_claim_depth
-        self.max_premises_per_dependency = max_premises_per_dependency
         self.connection = open_database(path, namespace)
         self._views: OrderedDict[tuple[int, int, int], MemoryView] = OrderedDict()
 
@@ -75,6 +74,11 @@ class OurMemStore:
     @property
     def current_seq(self) -> int:
         return self.connection.execute("SELECT COALESCE(MAX(seq), 0) FROM commits").fetchone()[0]
+
+    @property
+    def data_seq(self) -> int:
+        row = self.connection.execute("SELECT value FROM metadata WHERE key='data_seq'").fetchone()
+        return int(row[0]) if row else 0
 
     @property
     def source_cutoff(self) -> int:
@@ -125,6 +129,7 @@ class OurMemStore:
                      source.source_order, canonical_json(source), seq),
                 )
                 self._index_refs("source", source.id, source.generation_refs)
+            self.connection.execute("INSERT OR REPLACE INTO metadata VALUES ('data_seq', ?)", (str(seq),))
         self._views.clear()
         return result
 
@@ -178,8 +183,6 @@ class OurMemStore:
         for dep in dependencies:
             if dep.target_version_id not in all_versions:
                 raise ValueError(f"Missing dependency target: {dep.target_version_id}")
-            if not 1 <= len(dep.premise_refs) <= self.max_premises_per_dependency:
-                raise ValueError("Dependency premise count exceeds its configured bound")
             for ref in dep.premise_refs:
                 self._validate_ref(ref, current.sources, all_versions)
             signature = dependency_signature(dep)
@@ -328,6 +331,8 @@ class OurMemStore:
                 self.connection.execute(
                     "INSERT OR REPLACE INTO progress VALUES (?, ?)", (key, canonical_json(value))
                 )
+            if versions or dependencies or operations:
+                self.connection.execute("INSERT OR REPLACE INTO metadata VALUES ('data_seq', ?)", (str(seq),))
         self._views.clear()
         return seq
 
@@ -387,7 +392,27 @@ class OurMemStore:
         row = self.connection.execute(
             "SELECT id FROM snapshots WHERE commit_seq=? AND source_cutoff=?", (seq, cutoff)
         ).fetchone()
+        key = f"snapshot_obligations:{row[0]}"
+        if self.get_progress(key) is None:
+            with self.connection:
+                self.connection.execute("INSERT INTO progress VALUES (?, ?)",
+                                        (key, canonical_json({"items": self.unresolved(source_cutoff=cutoff)})))
         return self.snapshot(row[0])
+
+    def unresolved(self, snapshot=None, source_cutoff=None) -> list[dict]:
+        if snapshot is not None:
+            value = snapshot if isinstance(snapshot, Snapshot) else self.snapshot(snapshot)
+            record = self.get_progress(f"snapshot_obligations:{value.id}")
+            return record["items"] if record else []
+        cutoff = self.source_cutoff if source_cutoff is None else source_cutoff
+        result = []
+        for row in self.connection.execute("SELECT payload FROM progress WHERE key LIKE 'batch:%'"):
+            progress = json.loads(row[0])
+            for scope in progress.get("pending_scopes", []):
+                if scope.get("source_cutoff", cutoff) <= cutoff:
+                    # 对外只提供位置和类别，不把错误消息中的敏感原文绕过删除过滤。
+                    result.append({key: scope[key] for key in ("source_id", "source_cutoff", "span", "stage") if key in scope})
+        return result
 
     def view(
         self, snapshot: Snapshot | int | None = None, *, source_cutoff: int | None = None,
@@ -403,9 +428,11 @@ class OurMemStore:
             seq, cutoff = self.current_seq if sequence is None else sequence, self.source_cutoff
         if source_cutoff is not None:
             cutoff = min(cutoff, source_cutoff)
-        key = (seq, cutoff, self.current_seq)
+        # 单纯更新任务进度不重新解析全部语义记录。
+        data_seq = min(seq, self.data_seq)
+        key = (data_seq, cutoff, self.data_seq)
         if key in self._views:
-            return self._views[key]
+            return replace(self._views[key], sequence=seq)
         def rows(table: str) -> list:
             return self.connection.execute(
                 f"SELECT * FROM {table} WHERE seq <= ? AND source_order <= ? ORDER BY seq, rowid",
@@ -475,7 +502,6 @@ class OurMemStore:
         with self.connection:
             self.connection.execute("INSERT INTO commits DEFAULT VALUES")
             self.connection.execute("INSERT OR REPLACE INTO progress VALUES (?, ?)", (key, encoded))
-        self._views.clear()
 
     def put_embedding(self, record_id: str, model: str, text_hash: str, vector) -> None:
         import numpy as np

@@ -43,6 +43,9 @@ class MemoryCandidateRetriever:
         self._query_cache: dict[str, np.ndarray] = {}
         self._token_counter = token_counter
         self.last_trace: dict = {}
+        self._index_key = None
+        self._index = None
+        self._record_vectors = {}
 
     def _count(self, text: str) -> int:
         if self._token_counter:
@@ -113,9 +116,12 @@ class MemoryCandidateRetriever:
         by_text = dict(self._query_cache)
         for item in items:
             digest = sha256(item.text.encode()).hexdigest()
-            vector = self.store.get_embedding(item.id, self.model_name, digest)
+            vector = self._record_vectors.get((item.id, digest))
+            if vector is None:
+                vector = self.store.get_embedding(item.id, self.model_name, digest)
             records.append((item, digest, vector))
             if vector is not None:
+                self._record_vectors[item.id, digest] = vector
                 vectors[item.id] = vector
                 by_text.setdefault(item.text, vector)
         missing_texts = list(dict.fromkeys(
@@ -133,6 +139,7 @@ class MemoryCandidateRetriever:
                 vector = by_text[item.text]
                 self.store.put_embedding(item.id, self.model_name, digest, vector)
                 vectors[item.id] = vector
+                self._record_vectors[item.id, digest] = vector
         for query in queries:
             self._query_cache.setdefault(query, by_text[query])
         return np.stack([vectors[item.id] for item in items]), [self._query_cache[query] for query in queries]
@@ -154,7 +161,17 @@ class MemoryCandidateRetriever:
         if mode not in self.config.max_candidates:
             raise ValueError(f"Unknown retrieval mode: {mode}")
         evaluation = _Evaluation(self.store.view(snapshot, source_cutoff=source_cutoff), query_time, source_span_cutoff)
-        items = self._items(mode, evaluation)
+        index_key = (min(evaluation.view.sequence, self.store.data_seq), self.store.data_seq,
+                     evaluation.view.source_cutoff, str(evaluation.now), str(source_span_cutoff), mode)
+        if self._index_key == index_key:
+            items, sparse, corpus = self._index
+        else:
+            items = self._items(mode, evaluation)
+            corpus = [_tokens(item.text) for item in items]
+            sparse = bm25s.BM25(method="lucene", idf_method="lucene", k1=1.5, b=0.75, backend="numpy")
+            if items:
+                sparse.index(corpus, show_progress=False)
+            self._index_key, self._index = index_key, (items, sparse, corpus)
         by_id = {item.id: item for item in items}
         mandatory = []
         for record in mandatory_context or []:
@@ -172,9 +189,6 @@ class MemoryCandidateRetriever:
             return mandatory
         matrix, vectors = (self._prepare_vectors(items, queries) if self.config.k_dense[mode]
                            else (None, [None] * len(queries)))
-        sparse = bm25s.BM25(method="lucene", idf_method="lucene", k1=1.5, b=0.75, backend="numpy")
-        corpus = [_tokens(item.text) for item in items]
-        sparse.index(corpus, show_progress=False)
         scores: dict[str, float] = defaultdict(float)
         per_query: list[list[str]] = []
         for query, vector in zip(queries, vectors):

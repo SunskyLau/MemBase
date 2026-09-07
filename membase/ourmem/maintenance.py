@@ -362,7 +362,7 @@ class MaintenanceEngine:
 
     def _evaluation(self, snapshot=None, query_time=None, source_cutoff=None, source_span_cutoff=None) -> _Evaluation:
         view = self.store.view(snapshot, source_cutoff=source_cutoff)
-        key = (view.sequence, view.source_cutoff, self.store.current_seq,
+        key = (min(view.sequence, self.store.data_seq), view.source_cutoff, self.store.data_seq,
                canonical_json(query_time), canonical_json(source_span_cutoff))
         if key != self._cached_key:
             self._cached_evaluation = _Evaluation(view, query_time, source_span_cutoff)
@@ -385,34 +385,10 @@ class MaintenanceEngine:
     def affected(self, changed_ids: list[str], snapshot=None, source_cutoff=None) -> list[str]:
         """完整传递闭包；失效依据、消歧原文与修订依据同样进入反向目录。"""
         view = self.store.view(snapshot, source_cutoff=source_cutoff)
-        reverse: dict[str, set[str]] = defaultdict(set)
+        families = defaultdict(list)
         for version in view.versions.values():
-            reverse[version.memory_key].add(version.id)
-        for dep in view.dependencies.values():
-            for ref in dep.premise_refs:
-                reverse[ref.id].add(dep.target_version_id)
-                for span in ref.context_refs:
-                    reverse[span.source_id].add(dep.target_version_id)
-            reverse[dep.id].add(dep.target_version_id)
-        for source in view.sources.values():
-            for ref in source.generation_refs:
-                reverse[ref.id].add(source.id)
-                for span in ref.context_refs:
-                    reverse[span.source_id].add(source.id)
-        for version in view.versions.values():
-            if version.revision:
-                for ref in version.revision.evidence_refs:
-                    reverse[ref.id].add(version.id)
-                    for span in ref.context_refs:
-                        reverse[span.source_id].add(version.id)
-        for op in view.operations:
-            if op.scope in {"version", "key"}:
-                targets = ([op.target_id] if op.scope == "version" else
-                           [v.id for v in view.versions.values() if v.memory_key == op.target_id])
-                for ref in op.evidence_refs:
-                    reverse[ref.id].update(targets)
-                    for span in ref.context_refs:
-                        reverse[span.source_id].update(targets)
+            families[version.memory_key].append(version.id)
+        operations = {op.id: op for op in view.operations}
         queue = deque(changed_ids)
         seen: set[str] = set()
         while queue:
@@ -420,7 +396,24 @@ class MaintenanceEngine:
             if node in seen:
                 continue
             seen.add(node)
-            queue.extend(sorted(reverse[node] - seen))
+            following = set(families.get(node, ()))
+            if node in view.dependencies:
+                following.add(view.dependencies[node].target_version_id)
+            for owner_type, owner_id in self.store.connection.execute(
+                    "SELECT owner_type, owner_id FROM refs WHERE ref_id=?", (node,)):
+                if owner_type == "dependency" and owner_id in view.dependencies:
+                    following.add(view.dependencies[owner_id].target_version_id)
+                elif owner_type == "version" and owner_id in view.versions:
+                    following.add(owner_id)
+                elif owner_type == "source" and owner_id in view.sources:
+                    following.add(owner_id)
+                elif owner_type == "operation" and owner_id in operations:
+                    op = operations[owner_id]
+                    if op.scope == "version":
+                        following.add(op.target_id)
+                    elif op.scope == "key":
+                        following.update(families[op.target_id])
+            queue.extend(sorted(following - seen))
         # 直接比较拓扑深度，保证原子依赖先于上层目标，不截断传播层数。
         dependencies = defaultdict(set)
         for dep in view.dependencies.values():

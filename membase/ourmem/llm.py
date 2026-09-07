@@ -3,5 +3,5 @@
 from ..inference_utils.model_client import (
     BudgetExceeded, ContextLimitError, ModelCallError, ModelClient, OutputLimitError,
     RecoverableModelError, RefusedOutputError, RequestBudget, StructuredOutputError,
-    TextResult, TransientModelError, failure_details,
+    TextResult, TransientModelError, TransportUnavailable, failure_details,
 )

@@ -50,10 +50,9 @@ class OurMemSystem:
         if namespace in self._namespaces:
             return self._namespaces[namespace]
         store = OurMemStore(self.database_path(namespace), namespace,
-                            max_claim_depth=self.config.max_claim_depth,
-                            max_premises_per_dependency=self.config.max_premises_per_dependency)
+                            max_claim_depth=self.config.max_claim_depth)
         # 接口密钥不落盘；路径和调用者名称不改变记忆方法。
-        config_data = self.config.model_dump(mode="json", exclude={"api_key", "user_id", "save_dir"})
+        config_data = self.config.model_dump(mode="json", exclude={"api_key", "user_id", "save_dir", "request_timeout", "transport_retry_window"})
         expected = {"sha256": sha256(canonical_json(config_data).encode()).hexdigest(), "config": config_data}
         prior = store.get_progress("system:configuration")
         if prior is not None and prior != expected:

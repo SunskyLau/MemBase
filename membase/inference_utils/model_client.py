@@ -41,6 +41,8 @@ class ModelClientConfig(BaseModel):
     seed: int = 0
     embedding_batch_size: int = 128
     request_timeout: float = 120.0
+    transport_retry_window: float = 0.0
+    short_references: bool = False
 
 
 class ModelCallError(RuntimeError):
@@ -56,6 +58,10 @@ class RecoverableModelError(ModelCallError):
 
 class TransientModelError(RecoverableModelError):
     pass
+
+
+class TransportUnavailable(ModelCallError):
+    """恢复窗口耗尽，应暂停工作，不能当成语义未决后继续消耗接口。"""
 
 
 class RefusedOutputError(RecoverableModelError):
@@ -184,7 +190,7 @@ def _json_default(value: Any) -> Any:
 class ModelClient:
     def __init__(self, config, budget: RequestBudget | None = None,
                  log_path: str | Path | None = None, backend=None,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep, clock=time.monotonic) -> None:
         self.config = config
         self._owns_budget = budget is None
         self.budget = budget if budget is not None else RequestBudget()
@@ -193,6 +199,7 @@ class ModelClient:
         self._owns_backend = backend is None
         self._backend_lock = threading.Lock()
         self._sleep = sleep
+        self._clock = clock
         self._log_lock = threading.Lock()
         self._tokenizer = None
 
@@ -250,7 +257,7 @@ class ModelClient:
     def _chat_once(self, messages: list[dict], *, stage: str, model: str,
                    temperature: float, max_tokens: int, json_mode: bool,
                    allow_truncated: bool = False, response_format: dict | None = None,
-                   use_seed: bool = True) -> str:
+                   use_seed: bool = True, timeout: float | None = None) -> str:
         input_count = sum(self.count_tokens(message["content"]) for message in messages) + 32
         if input_count > self.config.max_context_tokens:
             raise ContextLimitError(f"{stage} input {input_count} exceeds {self.config.max_context_tokens}")
@@ -265,6 +272,8 @@ class ModelClient:
         try:
             kwargs = {"model": model, "messages": messages, "temperature": temperature,
                       "max_tokens": max_tokens}
+            if timeout is not None:
+                kwargs["timeout"] = timeout
             if use_seed and stage not in {"answer", "judge"}:
                 kwargs["seed"] = self.config.seed
             if json_mode:
@@ -293,18 +302,47 @@ class ModelClient:
         self._log({**record, "usage": usage, "elapsed": time.monotonic() - started})
         return result
 
+    def _network_call(self, send, recovery, request_ids):
+        """一次逻辑请求共享恢复窗口；基线的默认窗口为零，行为不变。"""
+        window = getattr(self.config, "transport_retry_window", 0)
+        while True:
+            remaining = recovery.get("deadline", float("inf")) - self._clock()
+            if remaining <= 0:
+                raise TransportUnavailable("Transport recovery window exhausted; resume from checkpoint", request_ids=request_ids)
+            try:
+                return send(min(self.config.request_timeout, remaining) if window else None)
+            except Exception as error:
+                if not window or not self._retryable(error):
+                    raise
+                if getattr(error, "request_id", None) is not None:
+                    request_ids.append(error.request_id)
+                recovery.setdefault("deadline", self._clock() + window)
+                failures = recovery.get("failures", 0)
+                delay = (5, 15, 30, 60, 120)[min(failures, 4)]
+                recovery["failures"] = failures + 1
+                remaining = recovery["deadline"] - self._clock()
+                self._log({"event": "transport_wait", "seconds": min(delay, max(0, remaining)),
+                           "reason": self._safe(str(error))})
+                # 等待分段进行，运行器的中断信号可及时生效。
+                wait = min(delay, max(0, remaining))
+                while wait > 0:
+                    part = min(60, wait)
+                    self._sleep(part)
+                    wait -= part
+
     def text(self, prompt: str, *, stage: str = "answer", model: str | None = None,
              temperature: float = 0, max_tokens: int | None = None,
              system: str | None = None, allow_truncated: bool = False) -> str:
         messages = ([{"role": "system", "content": system}] if system else [])
         messages.append({"role": "user", "content": prompt})
         request_ids = []
+        recovery = {}
         for attempt in range(self.config.max_llm_retries + 1):
             try:
-                return self._chat_once(messages, stage=stage, model=model or self.config.answer_model,
+                return self._network_call(lambda timeout: self._chat_once(messages, stage=stage, model=model or self.config.answer_model,
                                        temperature=temperature,
                                        max_tokens=max_tokens or self.config.max_model_output_tokens,
-                                       json_mode=False, allow_truncated=allow_truncated)
+                                       json_mode=False, allow_truncated=allow_truncated, timeout=timeout), recovery, request_ids)
             except Exception as error:
                 if getattr(error, "request_id", None) is not None:
                     request_ids.append(error.request_id)
@@ -327,16 +365,22 @@ class ModelClient:
             if payload is not None:
                 raise ValueError("An explicit system message requires payload=None")
             messages.insert(0, {"role": "system", "content": system})
+        codec = None
+        if payload is not None and getattr(self.config, "short_references", False):
+            from .reference_codec import ReferenceCodec
+            codec = ReferenceCodec(json.loads(messages[1]["content"]))
+            messages[1]["content"] = json.dumps(codec.encode(json.loads(messages[1]["content"])), ensure_ascii=False)
         last_validation = None
         request_ids = []
+        recovery = {}
         for attempt in range(self.config.max_llm_retries + 1):
             request_id = None
             content = None
             try:
-                content = self._chat_once(messages, stage=stage, model=model or self.config.model_name,
+                content = self._network_call(lambda timeout: self._chat_once(messages, stage=stage, model=model or self.config.model_name,
                                           temperature=self.config.memory_temperature if temperature is None else temperature,
                                           max_tokens=max_tokens or self.config.max_model_output_tokens, json_mode=True,
-                                          response_format=response_format, use_seed=use_seed)
+                                          response_format=response_format, use_seed=use_seed, timeout=timeout), recovery, request_ids)
                 request_id = getattr(content, "request_id", None)
                 if request_id is not None:
                     request_ids.append(request_id)
@@ -345,6 +389,7 @@ class ModelClient:
                 raw = json.loads(content)
                 if not isinstance(raw, dict):
                     raise ValueError("Expected a JSON object")
+                raw = codec.decode(raw) if codec else raw
                 return validator(raw) if validator is not None else raw
             except (ValueError, StructuredOutputError) as error:
                 last_validation = error
@@ -359,9 +404,14 @@ class ModelClient:
                     raise StructuredOutputError(self._safe(str(error)), request_ids=request_ids) from error
                 if payload is not None:
                     correction = "Return corrected JSON only. Previous output failed validation: " + self._safe(str(error))
+                    if codec:
+                        correction = codec.encode_text(correction)
                     # 让模型修正实际失败的结果，避免看不到原输出而重新生成、修一处退一处。
                     previous = [{"role": "assistant", "content": str(content)}] if content is not None else []
                     messages = messages[:2] + previous + [{"role": "user", "content": correction}]
+                    # 重试只保留可容纳的失败输出，不挤掉已核对的输入证据。
+                    if sum(self.count_tokens(m["content"]) for m in messages) + 32 > self.config.max_context_tokens:
+                        messages = messages[:2] + [{"role": "user", "content": correction}]
             except Exception as error:
                 if getattr(error, "request_id", None) is not None:
                     request_ids.append(error.request_id)
@@ -370,48 +420,55 @@ class ModelClient:
                 self._sleep(2 ** attempt)
         raise StructuredOutputError(str(last_validation))
 
-    def embed(self, texts: list[str], *, stage: str = "embedding") -> list[list[float]]:
+    def _embed_once(self, batch, stage, timeout):
         import numpy as np
-        embeddings: list[list[float]] = []
+        request_id = self.budget.reserve("embedding", stage, self.config.embedding_model_name)
+        started, usage = time.monotonic(), None
+        record = {"id": request_id, "kind": "embedding", "stage": stage, "model": self.config.embedding_model_name,
+                  "text_hashes": [sha256(text.encode()).hexdigest() for text in batch]}
+        try:
+            kwargs = {"model": self.config.embedding_model_name, "input": batch}
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            response = self.backend.embeddings.create(**kwargs)
+            usage = self._usage(response)
+            ordered = sorted(response.data, key=lambda item: item.index)
+            if [item.index for item in ordered] != list(range(len(batch))):
+                raise StructuredOutputError("Embedding response does not match input items")
+            try:
+                vectors = np.asarray([item.embedding for item in ordered], dtype=np.float32)
+            except ValueError as error:
+                raise StructuredOutputError("Embedding vectors have inconsistent dimensions") from error
+            if vectors.ndim != 2 or not np.isfinite(vectors).all() or not (np.linalg.norm(vectors, axis=1) > 0).all():
+                raise StructuredOutputError("Embedding response contains invalid vectors")
+        except Exception as error:
+            error.request_id = request_id
+            message = self._safe(str(error))
+            self.budget.finish(request_id, usage=usage, error=message, elapsed=time.monotonic() - started)
+            if isinstance(error, StructuredOutputError):
+                self.budget.validation_failed(request_id, message)
+            self._log({**record, "usage": usage, "error": message, "elapsed": time.monotonic() - started})
+            raise
+        self.budget.finish(request_id, usage=usage, elapsed=time.monotonic() - started)
+        self._log({**record, "usage": usage})
+        return vectors.tolist()
+
+    def embed(self, texts: list[str], *, stage: str = "embedding") -> list[list[float]]:
+        embeddings = []
         for start in range(0, len(texts), self.config.embedding_batch_size):
             batch = texts[start:start + self.config.embedding_batch_size]
-            request_ids = []
+            request_ids, recovery = [], {}
             for attempt in range(self.config.max_llm_retries + 1):
-                backend = self.backend
-                request_id = self.budget.reserve("embedding", stage, self.config.embedding_model_name)
-                request_ids.append(request_id)
-                started, usage = time.monotonic(), None
                 try:
-                    response = backend.embeddings.create(model=self.config.embedding_model_name, input=batch)
-                    usage = self._usage(response)
-                    ordered = sorted(response.data, key=lambda item: item.index)
-                    if [item.index for item in ordered] != list(range(len(batch))):
-                        raise StructuredOutputError("Embedding response does not match input items")
-                    try:
-                        vectors = np.asarray([item.embedding for item in ordered], dtype=np.float32)
-                    except ValueError as error:
-                        raise StructuredOutputError("Embedding vectors have inconsistent dimensions") from error
-                    if vectors.ndim != 2 or not np.isfinite(vectors).all() or not (np.linalg.norm(vectors, axis=1) > 0).all():
-                        raise StructuredOutputError("Embedding response contains invalid vectors")
+                    embeddings.extend(self._network_call(
+                        lambda timeout: self._embed_once(batch, stage, timeout), recovery, request_ids))
+                    break
                 except Exception as error:
-                    self.budget.finish(request_id, usage=usage, error=self._safe(str(error)),
-                                       elapsed=time.monotonic() - started)
-                    if isinstance(error, StructuredOutputError):
-                        self.budget.validation_failed(request_id, self._safe(str(error)))
-                    self._log({"id": request_id, "kind": "embedding", "stage": stage,
-                               "model": self.config.embedding_model_name,
-                               "text_hashes": [sha256(text.encode()).hexdigest() for text in batch],
-                               "usage": usage, "error": self._safe(str(error)),
-                               "elapsed": time.monotonic() - started})
+                    if getattr(error, "request_id", None) is not None:
+                        request_ids.append(error.request_id)
                     if (not self._retryable(error) and not isinstance(error, StructuredOutputError)) or attempt == self.config.max_llm_retries:
                         raise self._terminal_error(error, request_ids)
                     self._sleep(2 ** attempt)
-                else:
-                    self.budget.finish(request_id, usage=usage, elapsed=time.monotonic() - started)
-                    self._log({"id": request_id, "kind": "embedding", "stage": stage, "model": self.config.embedding_model_name,
-                               "text_hashes": [sha256(text.encode()).hexdigest() for text in batch], "usage": usage})
-                    embeddings.extend(vectors.tolist())
-                    break
         return embeddings
 
     def close(self) -> None:

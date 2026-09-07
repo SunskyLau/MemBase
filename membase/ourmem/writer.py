@@ -8,14 +8,15 @@ import json
 
 from .extractor import ExtractionResult, FactDraft, FactExtractor
 from .inducer import (DependencyInducer, DependencyProposal, LocalGraphProposal,
-                      INDUCTION_PROMPT, VERIFICATION_PROMPT, CONTROL_VERIFICATION_PROMPT)
-from .llm import ContextLimitError, OutputLimitError, RecoverableModelError, failure_details
+                      VERIFICATION_PROMPT, CONTROL_VERIFICATION_PROMPT)
+from .llm import ContextLimitError, OutputLimitError, RecoverableModelError, StructuredOutputError, failure_details
 from .models import (
     ControlOperation, DependencyLink, InputPolicy, MaintenanceReport, MemoryVersion,
     PremiseRef, Revision, Source, SourceSpan, TimePoint,
 )
-from .reconciler import CoordinationDecision, MemoryReconciler, RECONCILIATION_PROMPT
+from .reconciler import CoordinationDecision, MemoryReconciler
 from .structured_output import fits_request
+from .store import dependency_signature
 
 
 def _json(value) -> str:
@@ -56,6 +57,7 @@ class MemoryWriter:
         if progress.get("complete"):
             return MaintenanceReport.model_validate(progress["report"])
         report = MaintenanceReport.model_validate(progress.get("report", {}))
+        progress.setdefault("unresolved_drafts", {})
         source_map = {source.id: source for source in sources}
         if "extraction" not in progress:
             first = sources[0]
@@ -93,9 +95,18 @@ class MemoryWriter:
                         progress["report"] = report.model_dump(mode="json")
                         self.store.set_progress(key, progress)
                         continue
-                    stage, decision = self._coordinate(
-                        draft, input_policy, source.source_order, prefix, token,
-                    )
+                    try:
+                        stage, decision = self._coordinate(draft, input_policy, source.source_order, prefix, token)
+                    except RecoverableModelError as error:
+                        # 原文已保存；未决关系不猜测、不关闭旧值，也不阻挡无关输入。
+                        progress["unresolved_drafts"][str(index)] = {"draft": draft.model_dump(mode="json"),
+                            "source_cutoff": source.source_order, **failure_details(error)}
+                        self._remember_scope(progress, source, prefix, "reconcile", str(error), error=error)
+                        progress["completed_drafts"] = index + 1
+                        report.incomplete = True
+                        progress["report"] = report.model_dump(mode="json")
+                        self.store.set_progress(key, progress)
+                        continue
                     stored_write = {"changed_ids": stage.changed_ids, "action": decision.action,
                                     "reason": decision.reason}
                     saved = {**progress, "writes": {**progress.get("writes", {}), str(index): stored_write}}
@@ -103,6 +114,8 @@ class MemoryWriter:
                                       source_cutoff=source.source_order, progress={key: saved})
                     progress.update(saved)
                 if stored_write["action"] == "DEFER":
+                    progress["unresolved_drafts"][str(index)] = {"draft": draft.model_dump(mode="json"),
+                        "source_cutoff": source.source_order, "reason": stored_write["reason"]}
                     report.incomplete = True
                     report.results.append({"stage": "reconcile", "source_id": source.id,
                                            "outcome": "DEFERRED", "reason": stored_write["reason"]})
@@ -110,7 +123,7 @@ class MemoryWriter:
                 else:
                     report.changed_ids.extend(stored_write["changed_ids"])
                     self._maintain(stored_write["changed_ids"], source, prefix, input_policy,
-                                   key, progress, report)
+                                   key, progress, report, discover=False)
                 progress["completed_drafts"] = index + 1
                 progress["report"] = report.model_dump(mode="json")
                 self.store.set_progress(key, progress)
@@ -120,6 +133,13 @@ class MemoryWriter:
                 progress["technical_failed"] = True
                 self.store.set_progress(key, progress)
                 raise
+        # 可选归纳在批末执行一次；批内必要维护仍按各自的来源前缀处理。
+        if not progress.get("discovery_complete"):
+            last = sources[-1]
+            span = SourceSpan(source_id=last.id, start=0, end=len(last.content))
+            self._maintain(list(dict.fromkeys(report.changed_ids)), last, span, input_policy,
+                           key, progress, report, discover=True)
+            progress["discovery_complete"] = True
         for unresolved in extraction.unresolved:
             report.results.append({"stage": "extract", "outcome": "DEFERRED",
                                    **unresolved.model_dump(mode="json")})
@@ -144,12 +164,19 @@ class MemoryWriter:
         mandatory.extend(span.source_id for ref in draft.evidence_refs for span in ref.context_refs)
         mandatory.extend(version.id for version in staged.versions)
         def request(context, recheck=False):
-            return RECONCILIATION_PROMPT, self.reconciler.payload(
+            return self.reconciler.prompt(draft), self.reconciler.payload(
                 draft, context["versions"], policy, recheck, context)
         candidates = self._candidates([draft.content], "reconcile", cutoff, prefix,
                                       mandatory=mandatory, staged=staged, request_builder=request)
-        decision = self.reconciler.reconcile(draft, candidates["versions"], policy,
-                                             evidence_context=candidates)
+        try:
+            decision = self.reconciler.reconcile(draft, candidates["versions"], policy, evidence_context=candidates)
+        except StructuredOutputError:
+            # 一次针对关系的独立补检；不在同一组错误候选上无限纠错。
+            checked = self._candidates([draft.content, f"Existing subject and attribute for: {draft.content}"],
+                                       "reconcile", cutoff, prefix, mandatory=mandatory, staged=staged,
+                                       request_builder=lambda context: request(context, True))
+            decision = self.reconciler.reconcile(draft, checked["versions"], policy,
+                                                 identity_recheck=True, evidence_context=checked)
         if decision.identity == "NEW" and decision.action != "DEFER":
             checked = self._candidates([draft.content, decision.identity_description],
                                        "reconcile", cutoff, prefix, mandatory=mandatory, staged=staged,
@@ -293,12 +320,19 @@ class MemoryWriter:
         # 独立语义候选可以少取；已知结构证据不能截成半条路径。
         def fits(value):
             return fits_request(self.llm, self.config, *request_builder(value))
-        while not fits(context):
-            removable = [item for item in ids if item not in mandatory]
-            if not removable:
+        if not fits(context):
+            optional = [item for item in ids if item not in mandatory]
+            context = self._context(mandatory, cutoff, prefix, staged, source_spans)
+            if not fits(context):
                 raise ContextLimitError("A necessary proof exceeds max_context_tokens")
-            ids.remove(removable[-1])
-            context = self._context(ids, cutoff, prefix, staged, source_spans)
+            low, high = 0, len(optional)
+            while low < high:
+                middle = (low + high + 1) // 2
+                trial = self._context([*mandatory, *optional[:middle]], cutoff, prefix, staged, source_spans)
+                if fits(trial):
+                    low, context = middle, trial
+                else:
+                    high = middle - 1
         return context
 
     def _context(
@@ -327,13 +361,18 @@ class MemoryWriter:
             if item in view.versions and not self.evaluator.content_visible(item, source_cutoff=cutoff):
                 continue
             chosen_versions.add(item)
-            # 同版本族用于判断历史/替代关系，而不是自动重绑支持引用。
-            stack.extend(other.id for other in versions.values() if other.memory_key == version.memory_key)
+            # 只展开直接修订与选中的完整路径，不把整个版本族搬入每个请求。
+            if version.revision:
+                stack.append(version.revision.previous_version_id)
             refs = list(version.revision.evidence_refs) if version.revision else []
-            for dep in dependencies.values():
-                if dep.target_version_id == item:
-                    chosen_deps.add(dep.id)
-                    refs.extend(dep.premise_refs)
+            paths = [dep for dep in dependencies.values() if dep.target_version_id == item and dep.effect == "SUPPORT"]
+            if item in view.versions:
+                usable = set(self.evaluator.evaluate(item, source_cutoff=cutoff).support_ids)
+                paths = [dep for dep in paths if dep.id in usable] or paths
+            if paths:
+                dep = min(paths, key=lambda value: len(_json(value.premise_refs)))
+                chosen_deps.add(dep.id)
+                refs.extend(dep.premise_refs)
             for operation in view.operations:
                 if (operation.kind in {"close", "supersede", "correct"}
                         and (operation.target_id == item or operation.scope == "key" and operation.target_id == version.memory_key)):
@@ -408,6 +447,27 @@ class MemoryWriter:
         if ops:
             self.store.commit(operations=ops, source_cutoff=cutoff)
 
+    def _semantic_state(self, ids, cutoff):
+        view = self.store.view(source_cutoff=cutoff)
+        result = {}
+        for key in sorted(set(ids)):
+            if key in view.versions:
+                version = view.versions[key]
+                state = self.evaluator.evaluate(key, source_cutoff=cutoff)
+                result[key] = (version.content, version.valid_time.model_dump(mode="json"), version.modality,
+                    state.usable, state.reason, sorted(dependency_signature(d) for d in view.dependencies.values()
+                                                     if d.id in state.support_ids))
+            elif key in view.sources:
+                result[key] = self.evaluator.source_text(key, source_cutoff=cutoff)
+        return result
+
+    def _reviewable_operations(self, changed, cutoff):
+        evaluation = self.evaluator._evaluation(source_cutoff=cutoff)
+        changed = set(changed)
+        return [op.id for op in evaluation.operations if op.kind in {"close", "supersede", "correct"}
+                and any(ref.id in changed or any(span.source_id in changed for span in ref.context_refs)
+                        for ref in op.evidence_refs) and not evaluation.control_evidence_valid(op)]
+
     def _check_premises(self, refs, context, cutoff, prefix, staged) -> None:
         """只检查可确定的引用与时点；自然语言充分性仍由验证器负责。"""
         supplied = {source["id"]: source for source in context["sources"]}
@@ -435,14 +495,20 @@ class MemoryWriter:
 
     def _maintain(
         self, changed: list[str], source: Source, prefix: SourceSpan, policy: InputPolicy,
-        progress_key: str, progress: dict, report: MaintenanceReport,
+        progress_key: str, progress: dict, report: MaintenanceReport, *, discover=True,
     ) -> None:
         cutoff = source.source_order
         maintenance = self.evaluator.recompute(changed, source_cutoff=cutoff)
         pending = list(maintenance.pending_ids)
+        if not changed and not pending:
+            return
         self._mark_pending(pending, cutoff, "dependency_changed")
-        queue: list[tuple[list[str], list[str]]] = [(changed, pending)]
+        queue: list[tuple[list[str], list[str]]] = [(changed, pending)] if (discover or pending) else []
         def defer(targets, reason, error=None):
+            if not targets:
+                progress.setdefault("discovery_outcomes", []).append({"reason": reason,
+                    **(failure_details(error) if error else {})})
+                return
             self._deferred(report, targets, reason)
             if error is not None:
                 report.results[-1].update(failure_details(error))
@@ -451,7 +517,7 @@ class MemoryWriter:
             triggers, targets = queue.pop(0)
             reserved = any(fingerprint not in progress["fingerprints"]
                            for fingerprint in progress.get("generation_tasks", {}))
-            if (progress["generation_calls"] >= self.config.max_generation_calls_per_update and not reserved):
+            if (not targets and progress["generation_calls"] >= self.config.max_generation_calls_per_update and not reserved):
                 defer(targets, "generation_budget")
                 continue
             if len(targets) > self.config.max_repair_targets_per_call:
@@ -465,8 +531,10 @@ class MemoryWriter:
                                                         source_span_cutoff=prefix)
             queries.append(visible_source[prefix.start:prefix.end].strip() or "Changed memory controls")
             try:
-                build_request = lambda value: (INDUCTION_PROMPT, self.inducer.generation_payload(
-                    {**value, "input_policy": policy.model_dump(mode="json")}, targets))
+                reviewable = self._reviewable_operations(triggers, cutoff)
+                build_request = lambda value: self.inducer.generation_request(
+                    {**value, "input_policy": policy.model_dump(mode="json"), "reviewable_operation_ids": reviewable,
+                     "trigger_ids": [*triggers, source.id]}, targets)
                 context = self._candidates(queries, "derive", cutoff, prefix, [*triggers, *targets],
                                            request_builder=build_request)
             except ContextLimitError as error:
@@ -480,16 +548,22 @@ class MemoryWriter:
                 defer(targets, str(error), error)
                 continue
             context["input_policy"] = policy.model_dump(mode="json")
-            fingerprint = sha256(_json((context, targets, self.config.model_dump(exclude={"api_key"}))).encode()).hexdigest()
+            context.update(reviewable_operation_ids=reviewable, trigger_ids=[*triggers, source.id])
+            # 指纹只依赖语义条件；进度记录、临时查询和重复的解除暂停不引起重试。
+            fingerprint = sha256(_json((sorted(targets), sorted(triggers),
+                self._semantic_state([*triggers, *targets], cutoff), reviewable)).encode()).hexdigest()
             if fingerprint in progress["fingerprints"]:
                 continue
             tasks = progress.setdefault("generation_tasks", {})
             if fingerprint not in tasks:
-                if progress["generation_calls"] >= self.config.max_generation_calls_per_update:
+                if not targets and progress["generation_calls"] >= self.config.max_generation_calls_per_update:
                     defer(targets, "generation_budget")
                     continue
-                progress["generation_calls"] += 1
-                tasks[fingerprint] = {"ordinal": progress["generation_calls"]}
+                if targets:
+                    progress["repair_calls"] = progress.get("repair_calls", 0) + 1
+                else:
+                    progress["generation_calls"] += 1
+                tasks[fingerprint] = {"ordinal": len(tasks) + 1, "repair": bool(targets)}
                 self.store.set_progress(progress_key, progress)
             task = tasks[fingerprint]
             if "proposal" not in task:
@@ -514,15 +588,23 @@ class MemoryWriter:
                 task["proposal"] = proposal.model_dump(mode="json")
                 self.store.set_progress(progress_key, progress)
             proposal = LocalGraphProposal.model_validate(task["proposal"])
+            if not (proposal.claims or proposal.dependencies or proposal.repairs or proposal.control_reviews
+                    or proposal.gap_queries or proposal.open_queries):
+                progress.setdefault("discovery_outcomes", []).append({"reason": proposal.no_op_reason or "model_returned_no_proposal",
+                                                                       "kind": "no_new_memory"})
             if proposal.gap_queries or proposal.open_queries:
                 # 补检只在本次局部调用范围内执行一次，不递归发散。
                 try:
                     extra = self._candidates([*queries, *proposal.gap_queries, *proposal.open_queries],
                                              "derive", cutoff, prefix, [*triggers, *targets], request_builder=build_request)
                     extra["input_policy"] = policy.model_dump(mode="json")
-                    if (task.get("gap_reserved") or progress["generation_calls"] < self.config.max_generation_calls_per_update):
+                    extra.update(reviewable_operation_ids=reviewable, trigger_ids=[*triggers, source.id])
+                    if (targets or task.get("gap_reserved") or progress["generation_calls"] < self.config.max_generation_calls_per_update):
                         if not task.get("gap_reserved"):
-                            progress["generation_calls"] += 1
+                            if targets:
+                                progress["repair_calls"] = progress.get("repair_calls", 0) + 1
+                            else:
+                                progress["generation_calls"] += 1
                             task["gap_reserved"] = True
                         self.store.set_progress(progress_key, progress)
                         if "gap_proposal" not in task:
@@ -546,11 +628,12 @@ class MemoryWriter:
             progress["fingerprints"].append(fingerprint)
             self.store.set_progress(progress_key, progress)
             report.results.extend(failed)
-            report.incomplete |= bool(failed)
-            if failed:
+            failed_repairs = [item for item in failed if item.get("target_id") in targets]
+            report.incomplete |= bool(failed_repairs)
+            if failed_repairs:
                 self._remember_scope(progress, source, prefix, "discovery", "dependency_verification_incomplete",
                                      trigger_ids=triggers)
-            if not failed and not task.get("gap_incomplete"):
+            if not failed_repairs and not task.get("gap_incomplete"):
                 progress["pending_scopes"] = [scope for scope in progress["pending_scopes"]
                                                if not (scope["source_id"] == source.id
                                                        and scope["span"] == prefix.model_dump(mode="json")
@@ -561,7 +644,8 @@ class MemoryWriter:
                 result = self.evaluator.recompute(accepted, source_cutoff=cutoff)
                 self._mark_pending(result.pending_ids, cutoff, "dependency_changed")
                 # 新版本需要继续发现未知下游，不能只重算已有边就停止级联。
-                queue.append((accepted, result.pending_ids))
+                if discover or result.pending_ids:
+                    queue.append((accepted, result.pending_ids))
             for repair in proposal.repairs:
                 if repair.outcome == "DEFERRED" or any(item.get("target_id") == repair.target_id for item in failed):
                     report.pending_ids.append(repair.target_id)
@@ -592,24 +676,33 @@ class MemoryWriter:
         cutoff: int, prefix: SourceSpan, token: str,
     ) -> tuple[list[str], list[dict]]:
         claims = {claim.temporary_id: claim for claim in graph.claims}
-        expected_seq = self.store.current_seq
-        remaining = list(graph.dependencies)
+        receipt_key = f"graph:{token}"
+        receipt = self.store.get_progress(receipt_key) or {"mapping": {}, "done": [], "claims": {}, "changed_ids": []}
+        for key, value in receipt["claims"].items():
+            claims[key] = type(claims[key]).model_validate(value)
+        remaining = [dep for dep in graph.dependencies if dep.temporary_id not in receipt["done"]]
         staged = StagedWrite()
-        mapping: dict[str, str] = {}
+        mapping: dict[str, str] = dict(receipt["mapping"])
         failed: list[dict] = []
-        completed_targets: set[str] = set()
+        failed.extend(graph.issues)
+        completed_targets: set[str] = set(mapping)
+        changed_ids = list(receipt["changed_ids"])
         while remaining:
             ready_targets = []
             for dep in remaining:
                 target_deps = [item for item in remaining if item.target_id == dep.target_id]
-                if all(ref.id not in claims or ref.id in mapping for item in target_deps for ref in item.premise_refs):
+                if any(all(ref.id not in claims or ref.id in mapping for ref in item.premise_refs) for item in target_deps):
                     ready_targets.append(dep.target_id)
             if not ready_targets:
                 failed.extend({"target_id": dep.target_id, "stage": "verify", "reason": "cyclic_or_rejected_premise"} for dep in remaining)
                 break
-            for target_id in dict.fromkeys(ready_targets):
-                group = [dep for dep in remaining if dep.target_id == target_id]
-                remaining = [dep for dep in remaining if dep.target_id != target_id]
+            for target_id in list(dict.fromkeys(ready_targets))[:self.config.max_claims_per_call]:
+                group = [dep for dep in remaining if dep.target_id == target_id
+                         and all(ref.id not in claims or ref.id in mapping for ref in dep.premise_refs)]
+                # 每条或路径独立就绪；失败的兄弟路径不阻挡已经完整的路径。
+                group = group[:self.config.max_dependencies_per_call]
+                consumed = {dep.temporary_id for dep in group}
+                remaining = [dep for dep in remaining if dep.temporary_id not in consumed]
                 verified_links: list[DependencyLink] = []
                 target_stage = StagedWrite()
                 target_content = claims[target_id].content if target_id in claims else self.store.get_version(target_id).content
@@ -620,6 +713,11 @@ class MemoryWriter:
                                        "reason": "Closed versions require reconfirmation as a new period"})
                         continue
                     refs = [ref.model_copy(update={"id": mapping.get(ref.id, ref.id)}) for ref in dep.premise_refs]
+                    if target_id in claims and all(ref.type == "SOURCE" for ref in refs):
+                        refs = self._bind_atomic_premises(refs, cutoff)
+                        if not refs:
+                            failed.append({"target_id": target_id, "stage": "grounding", "reason": "atomic_premise_unresolved"})
+                            continue
                     resolved_dep = dep.model_copy(update={"premise_refs": refs})
                     premise_ids = [ref.id for ref in refs]
                     extra_context = {"target": claims[target_id].model_dump(mode="json") if target_id in claims
@@ -648,6 +746,16 @@ class MemoryWriter:
                     if not verification.accepted:
                         failed.append({"target_id": target_id, "stage": "verify", "reason": verification.reason})
                         continue
+                    if verification.revised_claim is not None:
+                        if target_id not in claims or target_id in mapping:
+                            failed.append({"target_id": target_id, "stage": "verify", "reason": "Cannot rewrite an already bound target"})
+                            continue
+                        if verified_links:
+                            failed.append({"target_id": target_id, "stage": "verify", "reason": "Earlier path validated a different formulation"})
+                            continue
+                        revised = verification.revised_claim.model_copy(update={"temporary_id": target_id})
+                        claims[target_id] = revised
+                        target_content = revised.content
                     for path in verification.sufficient_paths:
                         if target_id in claims and all(refs[index].type == "SOURCE" for index in path):
                             failed.append({"target_id": target_id, "stage": "verify",
@@ -660,7 +768,8 @@ class MemoryWriter:
                         ))
                 if not verified_links:
                     continue
-                if target_id in claims:
+                new_target = target_id in claims and target_id not in mapping
+                if new_target:
                     claim = claims[target_id]
                     support_refs = next(link.premise_refs for link in verified_links if link.effect == "SUPPORT")
                     draft = FactDraft(content=claim.content, valid_time=claim.valid_time,
@@ -680,24 +789,42 @@ class MemoryWriter:
                     # _materialize 提供的单路径由逐条验证后的完整 OR 路径替换。
                     target_stage.dependencies = []
                 else:
-                    real_id = target_id
+                    real_id = mapping.get(target_id, target_id)
                 for link in verified_links:
                     target_stage.dependencies.append(link.model_copy(update={"target_version_id": real_id}))
-                staged.versions.extend(target_stage.versions)
-                staged.dependencies.extend(target_stage.dependencies)
-                staged.operations.extend(target_stage.operations)
-                staged.changed_ids.extend(target_stage.changed_ids or [real_id])
+                    if link.effect == "INVALIDATE":
+                        target_stage.operations.append(ControlOperation(
+                            id=_id("op", token, "known_unknown", real_id), namespace=self.store.namespace,
+                            kind="resolve_pending", target_id=real_id, reason="UNKNOWN", source_cutoff=cutoff))
+                affected = list(dict.fromkeys([real_id, *target_stage.changed_ids]))
+                before = self._semantic_state(affected, cutoff)
+                committed = False
+                for link in target_stage.dependencies:
+                    versions = target_stage.versions if not committed else []
+                    if versions and versions[0].revision:
+                        version = versions[0]
+                        versions = [version.model_copy(update={"revision": version.revision.model_copy(
+                            update={"evidence_refs": link.premise_refs})})]
+                    try:
+                        # 每条充分路径可独立提交，超深或成环的另一条不能使它回滚。
+                        self.store.commit(versions, [link], target_stage.operations if not committed else [],
+                            source_cutoff=cutoff, progress={receipt_key: {
+                                "mapping": dict(mapping), "done": list(set(receipt["done"]) | consumed),
+                                "claims": {key: value.model_dump(mode="json") for key, value in claims.items() if key in mapping},
+                                "changed_ids": list(dict.fromkeys([*changed_ids, *affected]))}})
+                        committed = True
+                    except ValueError as error:
+                        failed.append({"target_id": target_id, "stage": "commit", "reason": str(error)})
+                if not committed:
+                    if new_target:
+                        mapping.pop(target_id, None)
+                    continue
+                after = self._semantic_state(affected, cutoff)
+                changed_ids.extend(key for key in affected if before.get(key) != after.get(key))
+                receipt = self.store.get_progress(receipt_key)
+                receipt["changed_ids"] = list(dict.fromkeys(changed_ids))
+                self.store.set_progress(receipt_key, receipt)
                 completed_targets.add(target_id)
-        replaced = {version.revision.previous_version_id for version in staged.versions if version.revision}
-        staged.dependencies = [dep for dep in staged.dependencies
-                               if not (dep.effect == "INVALIDATE" and dep.target_version_id in replaced)]
-        for dep in staged.dependencies:
-            if dep.effect == "INVALIDATE":
-                staged.operations.append(ControlOperation(
-                    id=_id("op", token, "known_unknown", dep.target_version_id), namespace=self.store.namespace,
-                    kind="resolve_pending", target_id=dep.target_version_id,
-                    reason="UNKNOWN", source_cutoff=cutoff,
-                ))
         for repair in graph.repairs:
             proof_target = repair.proposal_id if repair.outcome == "UPDATED" else repair.target_id
             if repair.outcome != "DEFERRED" and proof_target in completed_targets:
@@ -723,6 +850,7 @@ class MemoryWriter:
                     kind="resolve_pending", target_id=repair.target_id,
                     reason=repair.outcome, source_cutoff=cutoff,
                 ))
+                staged.changed_ids.append(repair.target_id)
             else:
                 failed.append({"target_id": repair.target_id, "stage": "repair", "reason": repair.reason})
         operation_map = {op.id: op for op in self.store.view(source_cutoff=cutoff).operations}
@@ -731,12 +859,28 @@ class MemoryWriter:
             if review.decision == "DEFERRED":
                 failed.append({"target_id": operation.target_id, "stage": "control_review", "reason": review.reason})
                 continue
+            if review.decision == "REVOKE" and policy.update_priority == "newer_source":
+                view = self.store.view(source_cutoff=cutoff)
+                def newest(refs):
+                    leaves = list(refs)
+                    for ref in refs:
+                        if ref.type != "SOURCE":
+                            leaves.extend(self.evaluator.evidence(ref.id, ref.at_time if ref.type == "HISTORICAL" else None,
+                                                                  source_cutoff=cutoff).refs)
+                    return max((view.sources[ref.id].source_order for ref in leaves if ref.type == "SOURCE"), default=-1)
+                if (self.evaluator._evaluation(source_cutoff=cutoff).control_evidence_valid(operation)
+                        and newest(review.evidence_refs) <= newest(operation.evidence_refs)):
+                    failed.append({"target_id": operation.target_id, "stage": "control_review", "reason": "Older evidence cannot undo public source precedence"})
+                    continue
             try:
                 operation_data = operation.model_dump(mode="json", exclude={"namespace", "created_at"})
                 review_context = self._candidates([review.reason], "validate", cutoff, prefix,
                                                    [operation.target_id, *[ref.id for ref in review.evidence_refs]], staged,
                                                    request_builder=lambda value: (CONTROL_VERIFICATION_PROMPT, self.inducer.verification_payload(
-                                                       {**value, "review": review.model_dump(mode="json"), "operation": operation_data})))
+                                                       {**value, "input_policy": policy.model_dump(mode="json"),
+                                                        "review": review.model_dump(mode="json"), "operation": operation_data})))
+                # 控制复核也必须知道来源优先规则，否则会将合法更新误判为错误。
+                review_context["input_policy"] = policy.model_dump(mode="json")
                 self._check_premises(review.evidence_refs, review_context, cutoff, prefix, staged)
                 verification = self.inducer.verify_control(review, operation_data, review_context)
             except RecoverableModelError as error:
@@ -756,21 +900,36 @@ class MemoryWriter:
                     kind="revoke_control", target_id=operation.id, scope="operation",
                     evidence_refs=refs, reason=review.reason, source_cutoff=cutoff,
                 ))
-            if operation.scope == "version":
+            pending = self.evaluator.evaluate(operation.target_id, source_cutoff=cutoff).reason == "maintenance_incomplete" if operation.scope == "version" else False
+            if operation.scope == "version" and pending:
                 staged.operations.append(ControlOperation(
                     id=_id("op", token, "control_reviewed", operation.id), namespace=self.store.namespace,
                     kind="resolve_pending", target_id=operation.target_id,
                     evidence_refs=refs, reason="control_reviewed", source_cutoff=cutoff,
                 ))
+            if review.decision == "REVOKE" or pending:
                 staged.changed_ids.append(operation.target_id)
         if staged.dependencies or staged.operations:
+            before = self._semantic_state(staged.changed_ids, cutoff)
             try:
-                sequence = self.store.commit(staged.versions, staged.dependencies, staged.operations,
-                                             expected_seq=expected_seq, source_cutoff=cutoff)
-                if sequence == expected_seq:
-                    return [], failed
+                self.store.commit(staged.versions, staged.dependencies, staged.operations, source_cutoff=cutoff)
             except ValueError as error:
                 # 全局环、深度、引用错误使整组回滚；不留下引用未提交前提的上层。
                 failed.append({"stage": "commit", "reason": str(error)})
-                return [], failed
-        return list(dict.fromkeys(staged.changed_ids)), failed
+                return list(dict.fromkeys(changed_ids)), failed
+            after = self._semantic_state(staged.changed_ids, cutoff)
+            changed_ids.extend(key for key in staged.changed_ids if before.get(key) != after.get(key))
+        return list(dict.fromkeys(changed_ids)), failed
+
+    def _bind_atomic_premises(self, refs, cutoff):
+        """只复用唯一、精确匹配的原子出处；不能把原文标识改名伪装成事实。"""
+        view = self.store.view(source_cutoff=cutoff)
+        bound = []
+        for ref in refs:
+            matches = {dep.target_version_id for dep in view.dependencies.values() if dep.effect == "SUPPORT"
+                       and len(dep.premise_refs) == 1 and dep.premise_refs[0] == ref
+                       and self.evaluator.evaluate(dep.target_version_id, source_cutoff=cutoff).usable}
+            if len(matches) != 1:
+                return []
+            bound.append(PremiseRef(type="CURRENT", id=next(iter(matches))))
+        return bound

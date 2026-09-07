@@ -11,13 +11,16 @@ CORRECTION_PREFIX = "Return corrected JSON only. Previous output failed validati
 def request_tokens(llm, prompt, payload):
     system = prompt if "json" in prompt.casefold() else prompt + "\nReturn a JSON object only."
     body = json.dumps(payload, ensure_ascii=False, default=lambda item: item.model_dump(mode="json"))
+    if getattr(getattr(llm, "config", None), "short_references", False):
+        from ..inference_utils.reference_codec import ReferenceCodec
+        value = json.loads(body)
+        body = json.dumps(ReferenceCodec(value).encode(value), ensure_ascii=False)
     return llm.count_tokens(system) + llm.count_tokens(body) + 32
 
 
 def fits_request(llm, config, prompt, payload):
-    # 最坏的一次纠错会带回前次输出；额外空间留给错误说明与消息包装。
-    reserve = (config.max_model_output_tokens + FEEDBACK_TOKENS + llm.count_tokens(CORRECTION_PREFIX) + 32
-               if config.max_llm_retries else 0)
+    # 只留简短纠错说明；失败输出按实际长度保留，不统一挤占六千词元。
+    reserve = FEEDBACK_TOKENS + llm.count_tokens(CORRECTION_PREFIX) + 32 if config.max_llm_retries else 0
     return request_tokens(llm, prompt, payload) + reserve <= config.max_context_tokens
 
 

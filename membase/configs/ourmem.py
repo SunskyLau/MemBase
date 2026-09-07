@@ -26,7 +26,6 @@ class OurMemConfig(MemBaseConfig):
     max_claim_depth: int = Field(default=5, ge=1)
     max_claims_per_call: int = Field(default=8, ge=1)
     max_dependencies_per_call: int = Field(default=24, ge=1)
-    max_premises_per_dependency: int = Field(default=8, ge=1)
     max_repair_targets_per_call: int = Field(default=8, ge=1)
     max_generation_calls_per_update: int = Field(default=8, ge=1)
     max_read_rounds: int = Field(default=4, ge=1)
@@ -38,6 +37,8 @@ class OurMemConfig(MemBaseConfig):
     seed: int = 0
     embedding_batch_size: int = Field(default=128, ge=1)
     request_timeout: float = Field(default=120.0, gt=0)
+    transport_retry_window: float = Field(default=900.0, ge=0)
+    short_references: bool = True
     k_dense: dict[str, int] = Field(default_factory=lambda: {
         "reconcile": 8, "derive": 16, "validate": 8,
         "read": 20, "history": 20, "aggregate": 20, "source": 8})
