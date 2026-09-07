@@ -47,6 +47,8 @@ LOADER_REPLACEMENT = '''        # CLAIMMEM_LOCAL_CONFLICT_DATA: use the pinned l
 
 
 def subsets(mode: str) -> list[str]:
+    if mode == "6k":
+        return ["factconsolidation_sh_6k", "factconsolidation_mh_6k"]
     if mode == "smoke":
         return ["factconsolidation_sh_6k"]
     if mode not in {"core", "full"}:

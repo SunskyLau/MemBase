@@ -21,6 +21,9 @@ def official_stage(stage, argv):
         if set(remaining) - allowed:
             parser.error("--run-dir 读取已冻结的运行配置，不与新的实验参数混用")
         saved = read_json(options.run_dir / "config.json")["config"]
+        if saved["baseline"] == "ourmem":
+            execution = read_json(options.run_dir / "execution.json")
+            saved.update({key: execution[key] for key in ("workers", "check_workers")})
         for name in ("data_root", "upstream_dir", "run_dir", "memory_config", "budget_ledger"):
             if saved.get(name) is not None:
                 saved[name] = Path(saved[name])

@@ -10,7 +10,7 @@ import re
 import sqlite3
 
 
-STAGES = {"extract": "抽取", "reconcile": "协调", "generate": "派生/修复",
+STAGES = {"extract": "抽取", "reconcile": "协调", "reconcile_check": "关系复核", "generate": "派生/修复",
           "verify": "依赖验证", "verify_control": "控制复核", "embedding": "嵌入",
           "read_plan": "问题分解", "read_assess": "证据判断", "answer": "回答", "judge": "评分",
           "amem_analyze": "A-MEM 笔记分析", "amem_evolve": "A-MEM 演化",
@@ -89,9 +89,13 @@ class ExperimentProgress:
                         memories = db.execute("SELECT count(*) FROM versions").fetchone()[0]
                         total = manifest.get("messages", "?")
                         parts.append(f"输入处理 {done}/{total}；记忆版本 {memories}（含历史）")
-                        scopes = sum(len(json.loads(row[0]).get("pending_scopes", []))
-                                     for row in db.execute("SELECT payload FROM progress"))
-                        parts.append(f"待处理范围 {scopes}")
+                        records = [json.loads(row[0]) for row in db.execute("SELECT payload FROM progress WHERE key LIKE 'batch:%'")]
+                        scopes = [s for p in records for s in p.get("pending_scopes", [])]
+                        inputs = sum(s.get("stage") in {"extract", "reconcile"} for s in scopes)
+                        pending = db.execute("SELECT payload FROM state_cache").fetchall()
+                        repairs = sum(json.loads(p[0]).get("reason") == "maintenance_incomplete" for p in pending)
+                        stopped = sum(len(p.get("discovery_outcomes", [])) for p in records)
+                        parts.append(f"输入未决 {inputs}；待修复目标 {repairs}；可选探索结束 {stopped}")
                         batch = ingest.get("pending_batch")
                         if batch:
                             row = db.execute("SELECT payload FROM progress WHERE key=?", ("batch:" + batch["id"],)).fetchone()

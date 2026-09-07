@@ -15,7 +15,8 @@ def main(argv=None, *, stages=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", choices=["locomo", "longmemeval", "memoryagentbench", "meme"], required=True)
     parser.add_argument("--baseline", required=True)
-    parser.add_argument("--mode", choices=["smoke", "core", "full"], default="core")
+    parser.add_argument("--mode", choices=["smoke", "core", "full", "6k"], default="core",
+                        help="6k 仅用于 MAB：6k 单跳和多跳全部问题")
     parser.add_argument("--output-dir", type=Path, required=True, help="本实验的 runs 目录")
     parser.add_argument("--run-id", default="", help="留空时以 UTC 时间命名；相同配置可续跑")
     parser.add_argument("--data-root", type=Path)
@@ -39,6 +40,8 @@ def main(argv=None, *, stages=None) -> int:
     parser.add_argument("--budget-ledger", type=Path, help="多个受限验证共享的 SQLite 请求计数")
     parser.add_argument("--locomo-judge", action="store_true", help="额外报告 LoCoMo 模型评判；不替代官方 F1")
     args = parser.parse_args(argv)
+    if args.mode == "6k" and args.benchmark != "memoryagentbench":
+        parser.error("6k 模式仅适用于 MemoryAgentBench")
 
     from membase.datasets import memoryagentbench, meme
     from membase.runners.benchmark import BenchmarkRunConfig

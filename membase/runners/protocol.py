@@ -37,6 +37,8 @@ class OfficialRunConfig(BenchmarkRunConfig):
             values.pop(key)
         if self.baseline == "ourmem":
             values.pop("top_k")
+            values.pop("workers")
+            values.pop("check_workers")
         values["temperature"] = self.temperature if self.benchmark == "memoryagentbench" else 0
         return values
 
@@ -75,7 +77,8 @@ def preview(config, stages=("construction", "search", "evaluation")):
                          if config.baseline == "ourmem" else {"storage": "isolated Chroma + atomic state checkpoint",
                              "checkpoint_interval": overrides.get("checkpoint_interval", 8), "evo_threshold": overrides.get("evo_threshold", 100),
                              "top_k": config.top_k, "max_evidence_tokens": overrides.get("max_evidence_tokens", 8000)}),
-              "scoring": "pinned official protocol"}
+              "scoring": "pinned official protocol",
+              "execution": {"workers": config.workers, "check_workers": config.check_workers}}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
 
@@ -97,7 +100,9 @@ class RunContext:
         if set(self.overrides) & {"api_key", "api_keys", "base_url", "base_urls", "llm_api_key", "embedding_api_key",
                                  "llm_base_url", "embedding_base_url"}:
             raise ValueError("方法配置不得包含接口凭据")
-        protocol["memory_overrides"] = self.overrides
+        protocol["memory_overrides"] = ({key: value for key, value in self.overrides.items()
+                                          if key not in {"request_timeout", "transport_retry_window"}}
+                                         if config.baseline == "ourmem" else self.overrides)
         path = config.run_dir / "config.json"
         if path.exists():
             saved = read_json(path)
@@ -132,6 +137,10 @@ class RunContext:
         if self.owns_client and not self.call_config.api_key:
             raise ValueError("请提供 OPENAI_API_KEY")
         start_run(config.run_dir, config.saved_config(), protocol)
+        if config.baseline == "ourmem":
+            write_json(config.run_dir / "execution.json", {"workers": config.workers, "check_workers": config.check_workers,
+                "request_timeout": self.call_config.request_timeout,
+                "transport_retry_window": self.call_config.transport_retry_window})
         self.client = client or ModelClient(self.call_config, budget=RequestBudget(
             config.max_llm_requests, config.max_embedding_requests, config.budget_ledger or config.run_dir / "budget.sqlite"),
             log_path=config.run_dir / "requests.jsonl")
@@ -191,7 +200,7 @@ class RunContext:
         write_json(self.directory(sample) / f"{stage}.json", {"complete": True, "manifest": episode_manifest(sample)})
 
     def execute(self, stage, worker):
-        from ..inference_utils.model_client import BudgetExceeded
+        from ..inference_utils.model_client import BudgetExceeded, TransportUnavailable
         from openai import APIStatusError
         write_json(self.config.run_dir / "status.json", {"status": "running", "stage": stage})
         completed, exhausted = [], False
@@ -225,9 +234,11 @@ class RunContext:
                         self.stage_failures.append({"sample": sample.key, "stage": stage,
                                                     "error_type": type(error).__name__, "reason": detail})
                         print(f"[{sample.key}] {stage} 未完成：{detail}", flush=True)
-                        if isinstance(error, (BudgetExceeded, APIStatusError, OSError, ImportError)):
+                        if isinstance(error, (BudgetExceeded, TransportUnavailable, APIStatusError, OSError, ImportError)):
                             exhausted = True
                             self.stop_requested = True
+                            if isinstance(error, TransportUnavailable):
+                                write_json(self.config.run_dir / "paused.json", {"reason": "transport_unavailable", "sample": sample.key})
                             if isinstance(error, BudgetExceeded):
                                 write_json(self.config.run_dir / "budget_stop.json", {"status": "stopped", "reason": "request_budget_exhausted"})
         if self.stage_failures:
