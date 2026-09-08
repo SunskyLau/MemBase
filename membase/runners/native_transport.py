@@ -66,5 +66,5 @@ def main():
         runpy.run_path(str(args.upstream / "main.py"), run_name="__main__")
     else:
         sys.path.insert(0, str(args.upstream / "code"))
-        configure_meme_dense()
-        runpy.run_module(args.module, run_name="__main__")
+        from .meme_runtime import execute
+        execute(args.module)

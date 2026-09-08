@@ -27,7 +27,7 @@ def child_environment(base_url: str, api_key_env: str = "OPENAI_API_KEY") -> dic
 
 
 def run_process(command: list[str], cwd: Path, log_path: Path, *,
-                env: dict[str, str], dry_run: bool = False) -> None:
+                env: dict[str, str], dry_run: bool = False, echo: bool = False) -> None:
     def redact(text: str) -> str:
         for name in ("OPENAI_API_KEY", "DASHSCOPE_API_KEY", "MEMBASE_EMBEDDING_API_KEY"):
             key = env.get(name, "")
@@ -48,6 +48,8 @@ def run_process(command: list[str], cwd: Path, log_path: Path, *,
                               stderr=subprocess.STDOUT, text=True, bufsize=1) as process:
             try:
                 for line in process.stdout:
+                    if echo:
+                        print(redact(line), end="", flush=True)
                     log.write(redact(line))
                     log.flush()
                 code = process.wait()

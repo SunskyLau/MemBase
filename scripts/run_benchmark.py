@@ -30,7 +30,7 @@ def main(argv=None, *, stages=None) -> int:
     parser.add_argument("--judge-model")
     parser.add_argument("--base-url")
     parser.add_argument("--top-k", type=int)
-    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--temperature", type=float)
     parser.add_argument("--parallel-jobs", type=int, default=1)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--judge-workers", type=int, default=4)
@@ -38,7 +38,7 @@ def main(argv=None, *, stages=None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--embedding-model", default="text-embedding-3-small")
     parser.add_argument("--memory-config", type=Path, help="记忆方法可选参数 JSON；不包含凭据")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int)
     parser.add_argument("--max-llm-requests", type=int)
     parser.add_argument("--max-embedding-requests", type=int)
     parser.add_argument("--budget-ledger", type=Path, help="多个受限验证共享的 SQLite 请求计数")
@@ -68,13 +68,18 @@ def main(argv=None, *, stages=None) -> int:
         from membase.runners.protocol import OfficialRunConfig
         config_type = OfficialRunConfig
         extra = dict(memory_config=args.memory_config,
-                     seed=args.seed, max_llm_requests=args.max_llm_requests,
+                     seed=args.seed if args.seed is not None else 0, max_llm_requests=args.max_llm_requests,
                      max_embedding_requests=args.max_embedding_requests,
                      budget_ledger=args.budget_ledger, locomo_judge=args.locomo_judge)
     else:
         module = memoryagentbench if args.benchmark == "memoryagentbench" else meme
         default_data, default_upstream = module.DEFAULT_DATA_ROOT, module.DEFAULT_UPSTREAM
         config_type, extra = BenchmarkRunConfig, {}
+        if args.benchmark == "meme" and args.baseline in {"in_context", "dense", "md_flat"}:
+            from membase.runners.meme import MemeRunConfig
+            config_type, extra = MemeRunConfig, {"seed":args.seed}
+    if args.temperature is None:
+        args.temperature = 0 if config_type.__name__ == "MemeRunConfig" else 0.7
     default_k = 10 if args.benchmark == "memoryagentbench" else 5
     if args.baseline == "ourmem":
         settings = read_json(args.memory_config) if args.memory_config else {}
