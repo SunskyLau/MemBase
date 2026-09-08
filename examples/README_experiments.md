@@ -1,6 +1,10 @@
 # 统一实验流程
 
+千问与 GPT-4o-mini 的独立切换、固定评判模型和服务配置见[模型配置说明](README_model_profiles.md)。
+
 OurMem 四个数据集复用 MemBase 原有的构建、检索和评测运行器。原始数据与固定版本官方仓库位置不变。五层派生、SQLite、时间与删除语义保持 V5 约定；自定义提示会随实现修复更新，官方回答与评分提示保持原样。
+
+当前 6k 实验入口为 [run_6k_hybrid.sh](evaluate_ourmem_on_memoryagentbench/run_6k_hybrid.sh)，配置与执行方式见 [混合检索说明](evaluate_ourmem_on_memoryagentbench/README_hybrid.md)。OurMem 的 `--top-k` 现指不同记忆条目的数量，默认 20，不截断必要支持链。下文早期运行名与只读续跑示例属于历史记录；本轮涉及写入代码修改，不能用当前代码续接旧构建，旧读取对照须在其对应源码版本下运行。
 
 ## 入口
 

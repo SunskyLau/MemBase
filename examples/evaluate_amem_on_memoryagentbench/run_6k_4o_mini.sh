@@ -7,20 +7,20 @@ JUDGE_PROFILE="gpt"                     # 两套实验固定同一评判模型
 EMBEDDING_PROFILE="gpt"                 # 不把 OpenAI 嵌入发往百炼
 
 MODE="core"
-CONDA_ENV="membase-ourmem"
-TOP_K=20
-WORKERS=4
+CONDA_ENV="membase-amem"
+TOP_K=10
+WORKERS=2
 JUDGE_WORKERS=4
 CHECK_WORKERS=8
 PARALLEL_JOBS=1
 SEED=0
-PROGRESS_INTERVAL=10                     # 进度刷新间隔（秒），不影响实验配置
-RUN_ID="mab_core_ourmem_02"
-MEMORY_CONFIG=""                       # 可选：OurMem 参数 JSON，不含密钥
-MAX_LLM_REQUESTS=""                     # 留空为全量；受限验证可填 100
-MAX_EMBEDDING_REQUESTS=""               # 留空为全量；受限验证可填 20
-BUDGET_LEDGER=""                        # 可选：跨实验共用的请求计数 SQLite
-LOCOMO_JUDGE=0                          # 额外模型评判，与官方 F1 分开
+PROGRESS_INTERVAL=10
+RUN_ID="mab_6k_amem_4o_mini_01"
+MEMORY_CONFIG=""
+MAX_LLM_REQUESTS=""
+MAX_EMBEDDING_REQUESTS=""
+BUDGET_LEDGER=""
+LOCOMO_JUDGE=0
 EMBEDDING_MODEL="text-embedding-3-small"
 DRY_RUN=0
 
@@ -49,8 +49,8 @@ fi
 
 exec "${python_command[@]}" "${repo_root}/scripts/run_with_progress.py" \
   --entry "$STAGE" --progress-interval "$PROGRESS_INTERVAL" \
-  --benchmark memoryagentbench --baseline ourmem --mode "$MODE" \
-  --output-dir "${repo_root}/experiments/ourmem_memoryagentbench/runs" --run-id "$RUN_ID" \
+  --benchmark memoryagentbench --baseline amem --mode "$MODE" \
+  --output-dir "${repo_root}/experiments/amem_memoryagentbench/runs" --run-id "$RUN_ID" \
   --model-profile "$experiment_model" --gpt-model gpt-4o-mini --qwen-model qwen3-30b-a3b-instruct-2507 \
   --judge-profile "$JUDGE_PROFILE" --judge-model gpt-4o-2024-11-20 --embedding-profile "$EMBEDDING_PROFILE" \
   --embedding-model "$EMBEDDING_MODEL" --top-k "$TOP_K" --seed "$SEED" \
