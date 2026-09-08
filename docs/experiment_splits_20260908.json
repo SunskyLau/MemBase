@@ -1,0 +1,125 @@
+{
+  "frozen_date": "2026-09-08",
+  "selection_rule": "Sort ids within each domain, shuffle with random.Random(20260908:<domain>), take first 20/10/5; do not reselect by performance",
+  "data_sha256": "a88d28374a002b3e5b1683fb7201d06a1ce739d2ebf94c971c37bb65cf6ebdd3",
+  "variant": "filler32k",
+  "sets": {
+    "meme40": [
+      "pl_050",
+      "pl_025",
+      "pl_001",
+      "pl_044",
+      "pl_019",
+      "pl_002",
+      "pl_004",
+      "pl_020",
+      "pl_022",
+      "pl_012",
+      "pl_030",
+      "pl_028",
+      "pl_039",
+      "pl_029",
+      "pl_027",
+      "pl_017",
+      "pl_048",
+      "pl_018",
+      "pl_031",
+      "pl_016",
+      "sw_028",
+      "sw_017",
+      "sw_032",
+      "sw_016",
+      "sw_010",
+      "sw_015",
+      "sw_034",
+      "sw_043",
+      "sw_035",
+      "sw_014",
+      "sw_025",
+      "sw_037",
+      "sw_033",
+      "sw_038",
+      "sw_026",
+      "sw_031",
+      "sw_041",
+      "sw_046",
+      "sw_039",
+      "sw_013"
+    ],
+    "audit20": [
+      "pl_050",
+      "pl_025",
+      "pl_001",
+      "pl_044",
+      "pl_019",
+      "pl_002",
+      "pl_004",
+      "pl_020",
+      "pl_022",
+      "pl_012",
+      "sw_028",
+      "sw_017",
+      "sw_032",
+      "sw_016",
+      "sw_010",
+      "sw_015",
+      "sw_034",
+      "sw_043",
+      "sw_035",
+      "sw_014"
+    ],
+    "repeat10": [
+      "pl_050",
+      "pl_025",
+      "pl_001",
+      "pl_044",
+      "pl_019",
+      "sw_028",
+      "sw_017",
+      "sw_032",
+      "sw_016",
+      "sw_010"
+    ]
+  },
+  "counts": {
+    "meme40": {
+      "episodes": 40,
+      "before_questions": 197,
+      "after_questions": 277,
+      "by_task": {
+        "Tr": 40,
+        "Cas": 64,
+        "Abs": 53,
+        "Del": 40,
+        "Agg": 40,
+        "ER": 40
+      }
+    },
+    "audit20": {
+      "episodes": 20,
+      "before_questions": 98,
+      "after_questions": 138,
+      "by_task": {
+        "Tr": 20,
+        "Cas": 32,
+        "Abs": 26,
+        "Del": 20,
+        "Agg": 20,
+        "ER": 20
+      }
+    },
+    "repeat10": {
+      "episodes": 10,
+      "before_questions": 52,
+      "after_questions": 72,
+      "by_task": {
+        "Tr": 10,
+        "Cas": 18,
+        "Abs": 14,
+        "Del": 10,
+        "Agg": 10,
+        "ER": 10
+      }
+    }
+  }
+}

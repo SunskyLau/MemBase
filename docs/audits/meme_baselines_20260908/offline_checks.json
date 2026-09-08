@@ -1,0 +1,75 @@
+{
+  "scope": [
+    "Full Context",
+    "Dense RAG",
+    "MD-flat"
+  ],
+  "benchmark": "MEME",
+  "validation_kind": "offline metadata and mocked regression checks only",
+  "upstream_commit": "0271ad85389a963cbc4892a36391f868ba4d18d1",
+  "source_hashes": {
+    "/home/jovyan/agent-memory/MemBase/scripts/run_benchmark.py": "50e7adca7a84f0927c7f0daf4a6d1e994a8f7ef654ecbd0cbae0a9ab7e8bee3a",
+    "/home/jovyan/agent-memory/MemBase/membase/runners/meme.py": "fe8b1df348c4c267fba993ce14e6ce9a1d057101b9a6830ef62b1b6228c50068",
+    "/home/jovyan/agent-memory/MemBase/membase/evaluation/meme.py": "833510495c842c63ba19fd1d51641ad00708c9ed963d366ca4362565ddc063d4",
+    "/home/jovyan/agent-memory/MemBase/membase/datasets/meme.py": "3493afb76da3ecd613986f12f6c346ce4f0224d57a80cc5fab44ad973429bc89",
+    "/home/jovyan/agent-memory/MemBase/membase/runners/native_transport.py": "bc622d98d73dd1bf7a6ce8935e04c6218196ee23981f392dee60a5a7fe7aa973",
+    "/home/jovyan/agent-memory/MemBase/external/MEME-public/code/eval/run_agent.py": "25d6f872365d66bec222f3573de03ef0f1785eb1397de7e1dac6aca7cb261048",
+    "/home/jovyan/agent-memory/MemBase/external/MEME-public/code/eval/in_context_baseline.py": "445921096e221ceff73c9b8cb0d0bf0157295475ff09f4b3ab8e06f12a1bd20b",
+    "/home/jovyan/agent-memory/MemBase/external/MEME-public/code/eval/judge.py": "4d19e4a8acc4f3143ace3b5933aeeb92a91e019d57cd0bba42c3bcba7c91a218",
+    "/home/jovyan/agent-memory/MemBase/external/MEME-public/code/agents/base.py": "0816bbd3f0c0bacb6828f8a9e8b9b2ad5a313b184fc048771d57baa612fa4c0e",
+    "/home/jovyan/agent-memory/MemBase/external/MEME-public/code/agents/dense_memory.py": "f855c8330fd3de245212672e05482e0d9a0b936b546805de7ca7d990fe46a237",
+    "/home/jovyan/agent-memory/MemBase/external/MEME-public/code/agents/md_file.py": "31672ca5504e503563df58c7111aeebc7648354e1d3f222a18033f195ee9c8c4"
+  },
+  "shell_syntax": {
+    "scripts": 6,
+    "passed": 6
+  },
+  "dry_runs": {
+    "count": 9,
+    "passed": 9,
+    "modes": {
+      "smoke": [
+        "nofiller:2"
+      ],
+      "core": [
+        "nofiller:2",
+        "filler32k:100"
+      ],
+      "full": [
+        "nofiller:100",
+        "filler32k:100",
+        "filler128k:40"
+      ]
+    }
+  },
+  "tests": {
+    "total": 21,
+    "passed": 20,
+    "failed": 1,
+    "failure": "test_native_baseline_execution_is_unchanged: historical byte-hash assertion for membase/runners/memoryagentbench.py"
+  },
+  "environments_missing": [
+    "membase-meme-incontext",
+    "membase-meme-dense",
+    "membase-meme-mdflat"
+  ],
+  "formal_output_files_found": {
+    "in_context": {
+      "answers": 0,
+      "judges": 0,
+      "summaries": 0
+    },
+    "dense": {
+      "answers": 0,
+      "judges": 0,
+      "summaries": 0
+    },
+    "md_flat": {
+      "answers": 0,
+      "judges": 0,
+      "summaries": 0
+    }
+  },
+  "no_paid_calls": true,
+  "source_code_changed": false
+}
