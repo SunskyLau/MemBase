@@ -1,0 +1,9 @@
+{
+  "llm_temperature": 0.7,
+  "llm_max_output_tokens": null,
+  "llm_max_input_tokens": null,
+  "evo_threshold": 100,
+  "checkpoint_interval": 8,
+  "preserve_unknown_time": true,
+  "max_evidence_tokens": null
+}

@@ -38,13 +38,13 @@ class ModelClientConfig(BaseModel):
     embedding_base_url: str | None = None
     judge_api_key: str = Field(default="", repr=False, exclude=True)
     judge_base_url: str | None = None
-    max_context_tokens: int = 16000
+    max_context_tokens: int | None = 16000
     max_model_output_tokens: int = 1000
     max_llm_retries: int = 2
     memory_temperature: float = 0.7
     seed: int = 0
     embedding_batch_size: int = 128
-    request_timeout: float = 120.0
+    request_timeout: float = 300.0
     transport_retry_window: float = 0.0
     short_references: bool = False
 
@@ -280,11 +280,11 @@ class ModelClient:
         return error
 
     def _chat_once(self, messages: list[dict], *, stage: str, model: str,
-                   temperature: float, max_tokens: int, json_mode: bool,
+                   temperature: float, max_tokens: int | None, json_mode: bool,
                    allow_truncated: bool = False, response_format: dict | None = None,
                    use_seed: bool = True, timeout: float | None = None) -> str:
         input_count = sum(self.count_tokens(message["content"]) for message in messages) + 32
-        if input_count > self.config.max_context_tokens:
+        if self.config.max_context_tokens is not None and input_count > self.config.max_context_tokens:
             raise ContextLimitError(f"{stage} input {input_count} exceeds {self.config.max_context_tokens}")
         backend = self.backend_for("judge") if stage == "judge" else self.backend
         request_id = self.budget.reserve("llm", stage, model)
@@ -295,8 +295,9 @@ class ModelClient:
                   "max_tokens": max_tokens, "temperature": temperature,
                   "prompt_hash": sha256(json.dumps(messages, ensure_ascii=False).encode()).hexdigest()}
         try:
-            kwargs = {"model": model, "messages": messages, "temperature": temperature,
-                      "max_tokens": max_tokens}
+            kwargs = {"model": model, "messages": messages, "temperature": temperature}
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
             if timeout is not None:
                 kwargs["timeout"] = timeout
             if use_seed and stage not in {"answer", "judge"}:
@@ -380,7 +381,8 @@ class ModelClient:
                      validator: Callable[[dict], T] | None = None,
                      model: str | None = None, *, system: str | None = None,
                      response_format: dict | None = None, temperature: float | None = None,
-                     max_tokens: int | None = None, use_seed: bool = True) -> T | dict:
+                     max_tokens: int | None = None, use_seed: bool = True,
+                     use_provider_output_limit: bool = False) -> T | dict:
         # payload=None 用于官方评分：不在其原版提示词后添加任何文字。
         messages = ([{"role": "user", "content": prompt}] if payload is None else [
             {"role": "system", "content": prompt if "json" in prompt.casefold() else prompt + "\nReturn a JSON object only."},
@@ -404,7 +406,8 @@ class ModelClient:
             try:
                 content = self._network_call(lambda timeout: self._chat_once(messages, stage=stage, model=model or self.config.model_name,
                                           temperature=self.config.memory_temperature if temperature is None else temperature,
-                                          max_tokens=max_tokens or self.config.max_model_output_tokens, json_mode=True,
+                                          max_tokens=(None if use_provider_output_limit else
+                                                      max_tokens or self.config.max_model_output_tokens), json_mode=True,
                                           response_format=response_format, use_seed=use_seed, timeout=timeout), recovery, request_ids)
                 request_id = getattr(content, "request_id", None)
                 if request_id is not None:
@@ -435,7 +438,8 @@ class ModelClient:
                     previous = [{"role": "assistant", "content": str(content)}] if content is not None else []
                     messages = messages[:2] + previous + [{"role": "user", "content": correction}]
                     # 重试只保留可容纳的失败输出，不挤掉已核对的输入证据。
-                    if sum(self.count_tokens(m["content"]) for m in messages) + 32 > self.config.max_context_tokens:
+                    if (self.config.max_context_tokens is not None and
+                            sum(self.count_tokens(m["content"]) for m in messages) + 32 > self.config.max_context_tokens):
                         messages = messages[:2] + [{"role": "user", "content": correction}]
             except Exception as error:
                 if getattr(error, "request_id", None) is not None:

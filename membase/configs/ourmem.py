@@ -38,7 +38,7 @@ class OurMemConfig(MemBaseConfig):
     memory_temperature: float = 0.0
     seed: int = 0
     embedding_batch_size: int = Field(default=128, ge=1)
-    request_timeout: float = Field(default=120.0, gt=0)
+    request_timeout: float = Field(default=300.0, gt=0)
     transport_retry_window: float = Field(default=900.0, ge=0)
     short_references: bool = True
     k_dense: dict[str, int] = Field(default_factory=lambda: {

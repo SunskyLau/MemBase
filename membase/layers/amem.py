@@ -35,6 +35,9 @@ class AMEMLayer(MemBaseLayer):
             embedding_api_key=config.embedding_api_key, embedding_base_url=config.embedding_base_url,
             user_id=config.user_id, shared_client=client, collection_name="amem_" + namespace,
             preserve_unknown_time=config.preserve_unknown_time)
+        controller = self.memory_layer.llm_controller.llm
+        controller.temperature = config.llm_temperature
+        controller.max_output_tokens = config.llm_max_output_tokens
 
     @classmethod
     def from_config(cls, config, *, client=None):

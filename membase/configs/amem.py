@@ -66,8 +66,14 @@ class AMEMConfig(MemBaseConfig):
     )
 
     preserve_unknown_time: bool = False
+    llm_temperature: float = Field(default=0.7, ge=0, le=2)
+    llm_max_output_tokens: int | None = Field(default=None, ge=1,
+        description="官方 OpenAI 路径默认不指定；如服务商默认截断，显式配置并记录适配值。")
+    llm_max_input_tokens: int | None = Field(default=None, ge=1,
+        description="不额外限制方法输入；仍受模型服务的真实上下文容量约束。")
     checkpoint_interval: int = Field(default=8, ge=1)
-    max_evidence_tokens: int = Field(default=8000, ge=1)
+    max_evidence_tokens: int | None = Field(default=None, ge=1,
+        description="默认完整保留检索结果，不额外施加证据词元预算。")
 
     def get_llm_models(self) -> list[str]:
         return [self.llm_model]

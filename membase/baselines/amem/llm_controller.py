@@ -14,6 +14,8 @@ class OpenAIController(BaseLLMController):
     def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, base_url: Optional[str] = None, shared_client=None):
         self.shared_client = shared_client
         self.input_policy = None
+        self.temperature = 0.7
+        self.max_output_tokens = None
         self.model = model
         if shared_client is not None:
             return
@@ -31,7 +33,8 @@ class OpenAIController(BaseLLMController):
         except ImportError:
             raise ImportError("OpenAI package not found. Install it with: pip install openai")
     
-    def get_completion(self, prompt: str, response_format: dict, temperature: float = 0.7) -> str:
+    def get_completion(self, prompt: str, response_format: dict, temperature: float | None = None) -> str:
+        temperature = self.temperature if temperature is None else temperature
         if self.shared_client is not None:
             from jsonschema import validate, ValidationError
             schema = response_format.get("json_schema", {}).get("schema")
@@ -48,9 +51,11 @@ class OpenAIController(BaseLLMController):
             result = self.shared_client.request_json(
                 "amem_analyze" if prompt.startswith("Generate a structured analysis") else "amem_evolve",
                 supplied_prompt, model=self.model, system="You must respond with a JSON object.",
-                response_format=response_format, temperature=temperature, max_tokens=1000,
+                response_format=response_format, temperature=temperature, max_tokens=self.max_output_tokens,
+                use_provider_output_limit=self.max_output_tokens is None,
                 use_seed=False, validator=check)
             return json.dumps(result, ensure_ascii=False)
+        options = {} if self.max_output_tokens is None else {"max_tokens": self.max_output_tokens}
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -59,7 +64,7 @@ class OpenAIController(BaseLLMController):
             ],
             response_format=response_format,
             temperature=temperature,
-            max_tokens=1000
+            **options
         )
         return response.choices[0].message.content
 

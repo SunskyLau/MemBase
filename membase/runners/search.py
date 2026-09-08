@@ -80,7 +80,8 @@ def search_phase(runtime, sample, phase, layer, snapshot_id, *, answer_now=False
                 entries, omitted = [], []
                 for entry in original:
                     text = "\n\n".join(e.formatted_content or e.content for e in [*entries, entry])
-                    if (client or runtime.client).count_tokens(text) <= runtime.memory_config.max_evidence_tokens:
+                    if (runtime.memory_config.max_evidence_tokens is None or
+                            (client or runtime.client).count_tokens(text) <= runtime.memory_config.max_evidence_tokens):
                         entries.append(entry)
                     else:
                         omitted.append(entry.metadata["id"])

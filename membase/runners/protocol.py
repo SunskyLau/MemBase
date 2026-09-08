@@ -85,7 +85,10 @@ def preview(config, stages=("construction", "search", "evaluation")):
                           "top_k": config.top_k, "reader": "single hybrid retrieval with grouped versions and support expansion"}
                          if config.baseline == "ourmem" else {"storage": "isolated Chroma + atomic state checkpoint",
                              "checkpoint_interval": overrides.get("checkpoint_interval", 8), "evo_threshold": overrides.get("evo_threshold", 100),
-                             "top_k": config.top_k, "max_evidence_tokens": overrides.get("max_evidence_tokens", 8000)}),
+                             "top_k": config.top_k, "max_evidence_tokens": overrides.get("max_evidence_tokens"),
+                             "llm_temperature": overrides.get("llm_temperature", 0.7),
+                             "llm_max_output_tokens": overrides.get("llm_max_output_tokens"),
+                             "llm_max_input_tokens": overrides.get("llm_max_input_tokens")}),
               "scoring": "pinned official protocol",
               "execution": {"workers": config.workers, "check_workers": config.check_workers}}
     if (config.run_dir / "read_revision.json").exists():
@@ -162,6 +165,8 @@ class RunContext:
                 "llm_api_key": api_key, "llm_base_url": config.base_url, "embedding_provider": "openai",
                 "retriever_name_or_path": config.embedding_model, "embedding_api_key": service_fields["embedding_api_key"],
                 "embedding_base_url": config.embedding_base_url or config.base_url, "preserve_unknown_time": True})
+            self.call_config = self.call_config.model_copy(update={
+                "max_context_tokens": self.memory_config.llm_max_input_tokens})
         self.owns_client = client is None
         start_run(config.run_dir, config.saved_config(), protocol)
         if config.baseline == "ourmem":

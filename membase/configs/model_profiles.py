@@ -27,7 +27,7 @@ def load_environment(path: Path = ENV_FILE) -> None:
 def endpoint(profile: str) -> tuple[str, str]:
     """返回服务地址和密钥变量名；不按模型名称猜测服务商。"""
     if profile == "gpt":
-        return os.environ.get("OPENAI_BASE_URL", "https://llm-api.net/v1"), "OPENAI_API_KEY"
+        return os.environ.get("OPENAI_BASE_URL", "https://api.n1n.ai/v1"), "OPENAI_API_KEY"
     if profile == "qwen":
         url = os.environ.get("DASHSCOPE_BASE_URL")
         if not url:

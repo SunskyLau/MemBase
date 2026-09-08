@@ -172,8 +172,9 @@ class AgenticMemorySystem:
         
     def _record_fallback(self, error, stage):
         if self.shared_client is not None:
-            from ...inference_utils.model_client import RecoverableModelError, failure_details
-            if not isinstance(error, RecoverableModelError):
+            from ...inference_utils.model_client import RecoverableModelError, OutputLimitError, failure_details
+            # 输出被截断不是“不需要演化”；禁止带着残缺结构回退成成功基线。
+            if isinstance(error, OutputLimitError) or not isinstance(error, RecoverableModelError):
                 raise error
             self.warnings.append({"stage": stage, **failure_details(error)})
         logger.warning("A-MEM %s fallback: %s", stage, error)

@@ -1,56 +1,53 @@
-# A-MEM 与 OurMem 的 MAB 核心对照
+# A-MEM：官方内部参数与统一 MAB 对照
 
-本目录复用 MemBase 内置 A-MEM，回补官方记忆标识和邻居更新修复；不使用 OurMem 的抽取、派生或读取规划。实现差异见 [来源说明](../../membase/baselines/amem/UPSTREAM.md)。
+本目录复用 MemBase 内置 A-MEM。方法参数优先参考官方论文实验仓库 `WujiangXu/AgenticMemory@0c8039f28fdcc08189a23c07a3437d9d2482f9c2`，不能将系统库函数默认值误称为论文实验配置。邻居标识修复仍参考 `A-mem-sys@f303dfc71e07bdc787f4bc135d4cea328ae30e99`。模型统一与输出完整性适配另行披露，不声称原论文的逐项复现。详细差异见 [来源说明](../../membase/baselines/amem/UPSTREAM.md)。
 
-两边都处理 6k、32k 单跳（single-hop）与多跳（multi-hop），四组共 400 题。构建和回答模型均为 `gpt-4.1-mini`，嵌入为 `text-embedding-3-small`；回答温度为 0.7，上限为官方 10 个词元。A-MEM 保留内部温度 0.7、输出上限 1,000、`TOP_K=10`、演化刷新阈值 100。最终证据上限均为 8,000 个词元，但实际用量与总计算成本不相等。
+## 参数分层
 
-无密钥示例是 `run.example.sh`，本地 `run.sh` 已被忽略。所有普通参数位于脚本顶部。不要把更换了模型配置的结果称为原论文配置的逐项复现。
+| 项目 | 官方论文实验代码 | 当前设置 |
+|---|---|---|
+| 分析/演化温度 | 0.7 | 0.7 |
+| 分析/演化输出上限 | 论文实现为1000；系统库可不指定 | 不发送，保留已验证的完整输出适配；明确不是论文原值 |
+| 演化邻居数 | 5 | 5 |
+| 演化刷新阈值 | 100 | 100 |
+| 最终检索数量 | 评测入口默认10，README建议按模型调整 | 10，不根据正式测试成绩扫描选择；未发现MAB/Qwen3专属推荐 |
+| 嵌入模型 | all-MiniLM-L6-v2 | text-embedding-3-small，统一对照配置 |
+| 构建和回答模型 | 可配置 | GPT-4o-mini / Qwen3-30B-A3B-Instruct-2507，各组方法统一 |
+| 最终回答温度/输出上限 | 非 A-MEM 内部参数 | MAB 回答协议：0.7 / 10词元 |
+| 最终证据预算 | 没有额外8000上限 | 不额外限制，完整保留方法检索结果 |
+| 无真实日期 | 原实现可用机器时间 | 保留未知，避免将虚构日期送入模型 |
+| 恢复保存间隔 | 接入层职责 | 每8条输入及阶段结束保存 |
 
-## 离线检查
+参数文件：[official_config.json](official_config.json)。其中 null 表示不主动发送输出上限，服务商仍有默认和硬上限；不代表无限输出。若服务商默认仍截断，必须用明确记录的足够上限验证，再为两种模型采用事先确定的可比策略。
 
-在 `/home/jovyan/agent-memory/MemBase` 执行：
+演化输入保留官方方法选择的完整笔记内容、上下文、关键词和标签，不通过截短输入规避失败。A-MEM 的公共调用配置也不再继承人为16000输入上限；仍受服务商实际容量约束。OurMem 自身的输入与证据配置不随之修改。
+
+原文、提示、邻居数量和演化策略不因调整输出上限而缩减。发生输出截断时明确停止受影响的构建，不将其当作正常“不演化”回退。其他原生可恢复回退仍记录警告；必须在论文中报告而非隐去。
+
+## 干运行与启动
+
+从任意工作目录调用完整路径，或在 agent-memory 目录运行：
 
 ```bash
+./MemBase/examples/evaluate_amem_on_memoryagentbench/run_6k_qwen.sh --dry-run
+./MemBase/examples/evaluate_amem_on_memoryagentbench/run_6k_4o_mini.sh --dry-run
+```
+
+两者都是6k单跳、多跳各100题、并发2，分别保存到：
+- `experiments/amem_memoryagentbench/runs/mab_6k_amem_official_03_qwen/`
+- `experiments/amem_memoryagentbench/runs/mab_6k_amem_official_03_gpt/`
+
+确认后去掉 `--dry-run` 才会调用付费接口。脚本中的 `construction/search/evaluation` 参数可单独执行同一配置的阶段。密钥和服务地址仅从 `envs/.env` 读取，嵌入仍走单独的 OpenAI 兼容服务，不发往百炼。
+
+`run.example.sh` 保留较大 core 范围（6k/32k，共400题）；不要把它与6k入口混淆。
+
+## 离线验证
+
+```bash
+cd /home/jovyan/agent-memory/MemBase
 /home/jovyan/my-conda-envs/membase-amem/bin/python -m unittest tests.benchmarks.test_amem_mab -b -q
 ```
 
-这会使用真实本地 Chroma 和模拟接口验证保存加载、向量刷新及公共三阶段，不调用付费模型。
+覆盖原生笔记、邻居更新、向量刷新、集合隔离、保存加载和三阶段恢复，以及默认不发送 max_tokens、显式覆盖和截断不能默默回退；另用超过8000词元的模拟检索结果验证完整保留到回答阶段。
 
-在 `/home/jovyan/agent-memory` 执行：
-
-```bash
-./MemBase/examples/evaluate_amem_on_memoryagentbench/run.sh --dry-run
-./MemBase/examples/evaluate_ourmem_on_memoryagentbench/run.sh --dry-run
-```
-
-应分别显示 `amem` 和 `ourmem`，均为 `core`、4 组、400 题、各自并发 4；两边同时运行时合计最多处理 8 个独立样本。干运行不创建记忆或启动实验。帮助可用 `python MemBase/scripts/run_benchmark.py --help` 查看。
-
-## 手动并行启动
-
-完成验证后，在两个终端分别启动，不要在运行中修改公共代码：
-
-```bash
-# 终端一，在 agent-memory 目录
-./MemBase/examples/evaluate_ourmem_on_memoryagentbench/run.sh
-```
-
-```bash
-# 终端二，在 agent-memory 目录
-./MemBase/examples/evaluate_amem_on_memoryagentbench/run.sh
-```
-
-默认运行名称分别为 `mab_core_ourmem_02`、`mab_core_amem_02`，输出位于各自的 `experiments/ourmem_memoryagentbench/runs/` 和 `experiments/amem_memoryagentbench/runs/`。OurMem 的新名称用于完整请求预算修复后的重建，A-MEM 的新名称用于 Chroma 并发初始化修复后的重建；旧目录均保留原样。核心实验默认不限制请求总数，会产生费用；并发数可在首次启动前调整。
-
-也可用本目录的 `run_construction.sh`、`run_search.sh`、`run_evaluation.sh` 单独执行阶段，它们读取同一份本地配置。
-
-## 进度、恢复与成绩
-
-A-MEM 每 8 条输入及阶段结束保存完整检查点，笔记与索引各自状态分别保留。通常最多重做最近 7 条；若写第 8 条检查点时中断，最多重做未提交的 8 条。加载直接恢复已有向量，不重做分析或嵌入；已发生的费用不因中断清零。不提供跨运行缓存，不迁移旧产物。
-
-原始材料无日期时保持未知。检索结果标记为 `not_assessed`，表示普通检索，没有伪造语义可用性判断。原生分析或演化回退会记录警告；单题检索、回答或评分的可恢复模型失败按零分计入原定分母，不伪造回答，也不在同一运行反复尝试已计零题。凭据、预算、存储与程序错误仍明确停止。
-
-请同时检查 `status.json`、`summary.json`、请求成本和技术失败数。`complete_with_warnings` 表示流程已结束但有技术失败或记忆回退；只有完整的 400 题终态才可作全量汇总。对比应逐组报告准确率、失败数以及构建/检索/回答成本。
-
-## 小额真实验证
-
-专用脚本 `scripts/validate_amem_mab.py` 仅在显式传入 `--real` 时调用接口。所有尝试共用 `experiments/mab_comparison_validation/request_budget.sqlite`，总上限为 20 次语言模型请求、20 次嵌入请求（包含重试），不能通过更换尝试名称扩额。它使用独立短场景，不是 MAB 正式结果；验证记录保存在同目录的报告中。
+旧运行不改写，不将中途改参数后的结果拼到旧运行中。每8条输入保存完整检查点；相同运行配置下可恢复，不因加载重新生成向量。修改内部温度和输出策略后应重新构建。

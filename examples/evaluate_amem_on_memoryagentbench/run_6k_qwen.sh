@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 密钥与地址统一读取 envs/.env；模型名称在这里独立调整。
-experiment_model="gpt"                     # gpt / qwen：构建与回答一起切换
+# 密钥与地址统一读取 envs/.env；实验模型在脚本内选择。
+experiment_model="qwen"                     # gpt / qwen：构建与回答一起切换
 JUDGE_PROFILE="gpt"                     # 两套实验固定同一评判模型
 EMBEDDING_PROFILE="gpt"                 # 不把 OpenAI 嵌入发往百炼
 

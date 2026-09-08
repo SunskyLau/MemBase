@@ -15,7 +15,7 @@ CHECK_WORKERS=8
 PARALLEL_JOBS=1
 SEED=0
 PROGRESS_INTERVAL=10                     # 进度刷新间隔（秒），不影响实验配置
-RUN_ID="mab_core_amem_02"
+RUN_ID="mab_core_amem_official_04"
 MEMORY_CONFIG=""                       # 可选：A-MEM 参数 JSON，不含密钥
 MAX_LLM_REQUESTS=""                     # 留空为全量；受限验证可填 100
 MAX_EMBEDDING_REQUESTS=""               # 留空为全量；受限验证可填 20
@@ -36,6 +36,7 @@ done
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
+MEMORY_CONFIG="${MEMORY_CONFIG:-${script_dir}/official_config.json}"
 python_command=(conda run --no-capture-output -n "$CONDA_ENV" python)
 if [[ "$DRY_RUN" == "1" ]]; then
   python_command=(python)
