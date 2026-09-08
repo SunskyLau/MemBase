@@ -11,25 +11,29 @@ import subprocess
 from .benchmark_files import read_json, write_json
 
 
-def require_runtime(modules: list[str]) -> None:
+def require_runtime(modules: list[str], api_key_env: str = "OPENAI_API_KEY") -> None:
     missing = [name for name in modules if importlib.util.find_spec(name) is None]
     if missing:
         raise ImportError("当前 Conda 环境缺少依赖：" + ", ".join(missing))
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise ValueError("请在 run.sh 顶部填写 OPENAI_API_KEY")
+    from ..configs.model_profiles import credential
+    credential(api_key_env)
 
 
-def child_environment(base_url: str) -> dict[str, str]:
+def child_environment(base_url: str, api_key_env: str = "OPENAI_API_KEY") -> dict[str, str]:
     env = os.environ.copy()
     env.update(OPENAI_BASE_URL=base_url, OPENAI_API_BASE=base_url, PYTHONUNBUFFERED="1")
+    env["OPENAI_API_KEY"] = os.environ.get(api_key_env, "")
     return env
 
 
 def run_process(command: list[str], cwd: Path, log_path: Path, *,
                 env: dict[str, str], dry_run: bool = False) -> None:
     def redact(text: str) -> str:
-        key = env.get("OPENAI_API_KEY", "")
-        return text.replace(key, "[REDACTED]") if key else text
+        for name in ("OPENAI_API_KEY", "DASHSCOPE_API_KEY", "MEMBASE_EMBEDDING_API_KEY"):
+            key = env.get(name, "")
+            if key:
+                text = text.replace(key, "[REDACTED]")
+        return text
 
     display = f"cd {shlex.quote(str(cwd))}\n{shlex.join(command)}\n"
     print(redact(display), end="", flush=True)

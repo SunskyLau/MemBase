@@ -8,7 +8,7 @@ import sys
 
 from ..datasets import memoryagentbench as data
 from ..evaluation import memoryagentbench as evaluation
-from ..utils.benchmark_files import preserve_incomplete, write_json
+from ..utils.benchmark_files import preserve_incomplete, write_json, sha256_file
 from ..utils.experiment import child_environment, finish_run, require_runtime, run_process, start_run
 from .benchmark import BenchmarkRunConfig
 
@@ -44,9 +44,10 @@ def run(config: BenchmarkRunConfig) -> dict | None:
                    "langchain_core", "numpy", "nltk", "rouge_score", "editdistance", "tqdm", "dotenv"]
         if config.baseline == "bm25":
             imports += ["langchain_community", "rank_bm25"]
-        require_runtime(imports)
+        require_runtime(imports, config.api_key_env)
         start_run(config.run_dir, config.saved_config(),
-                  {"upstream_commit": data.UPSTREAM_COMMIT, "data": prepared})
+                  {"upstream_commit": data.UPSTREAM_COMMIT, "data": prepared,
+                   "transport_adapter": sha256_file(Path(__file__).with_name("native_transport.py"))})
 
     def run_subset(source: str) -> tuple[str, dict | None]:
         stage_dir = config.run_dir / source
@@ -68,9 +69,12 @@ def run(config: BenchmarkRunConfig) -> dict | None:
                     preserve_incomplete(output)
         command = [sys.executable, str(config.upstream_dir / "main.py"),
                    "--agent_config", str(cfg_path), "--dataset_config", str(ds_config)]
+        if config.model_profile:
+            command = [sys.executable, str(Path(__file__).resolve().parents[2] / "scripts/run_native_benchmark.py"),
+                       "--benchmark", "memoryagentbench", "--upstream", str(config.upstream_dir), "--", *command[2:]]
         if config.mode == "smoke":
             command += ["--max_test_queries_ablation", "4"]
-        env = child_environment(config.base_url)
+        env = child_environment(config.base_url, config.api_key_env)
         env["MAB_CONFLICT_PARQUET"] = str(data.raw_path(config.data_root))
         env["HF_HOME"] = str(stage_dir / "cache/huggingface")
         env["TIKTOKEN_CACHE_DIR"] = str(stage_dir / "cache/tiktoken")

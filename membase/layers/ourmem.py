@@ -47,14 +47,14 @@ class OurMemLayer(MemBaseLayer):
     def from_config(cls, config, *, client=None):
         return cls(config, client=client)
 
-    def retrieve(self, query: str, k: int = 10, **kwargs: Any) -> list[MemoryEntry]:
-        if k < 1:
+    def retrieve(self, query: str, k: int | None = None, **kwargs: Any) -> list[MemoryEntry]:
+        if k is not None and k < 1:
             raise ValueError("k must be positive")
         snapshot_id = kwargs.get("snapshot_id") or self.flush()
         prepared = self.system.prepare_evidence(query, namespace=self.config.user_id,
                                                 snapshot_id=snapshot_id,
-                                                query_time=kwargs.get("query_time"))
-        # k 限制返回条目数，不截断必要路径；完整证据作为一条上下文返回。
+                                                query_time=kwargs.get("query_time"), top_k=k)
+        # k 限制入口记忆条目，必要支持路径作为完整上下文返回。
         return [MemoryEntry(content=prepared.context, formatted_content=prepared.context,
                             metadata={"snapshot_id": snapshot_id,
                                       **prepared.model_dump(mode="json", exclude={"context"})})]

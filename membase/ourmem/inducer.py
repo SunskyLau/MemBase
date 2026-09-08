@@ -40,6 +40,15 @@ You may derive a further conclusion from a supported intermediate claim in this 
 Return claims and dependencies; use gap_queries only for specific missing evidence.
 There is no scheduled repair work in this call. Do not audit old decisions merely because
 they were retrieved. Only explicit NEW counterevidence can justify a supplied control review.
+
+Prefer useful relationship composition. For example, given 'Project Cedar is designed
+by Mira' and 'Mira works in Harbor Lab', derive 'The designer of Project Cedar works in
+Harbor Lab', with BOTH memory ids as premises. This is an abstract example, not an input fact.
+Do not output a paraphrase of either premise, or merely join unrelated sentences with 'and'.
+Connect actual shared referents, retain conditions and modality, and keep the originating
+subject in the conclusion so it is retrievable later. Never insert a missing intermediate
+entity from world knowledge. Use existing memory ids rather than quoting their sources again.
+If a connection needs a missing fact, a specific gap_query may retrieve it during writing.
 """ + GRAPH_OUTPUT_GUIDE
 
 INDUCTION_PROMPT = """Repair the listed affected memories using the currently supplied evidence.
@@ -206,7 +215,12 @@ class DependencyInducer:
             schema["properties"].pop("control_reviews", None)
         if not self.config.q_max:
             schema["properties"].pop("open_queries", None)
-        return {**context, "repair_targets": repair_targets,
+        versions = []
+        for version in context["versions"]:
+            label = ("CURRENT" if version.get("resolution", {}).get("usable") else
+                     "REPAIR_TARGET" if version["id"] in repair_targets else "NOT_CURRENT_CONTEXT")
+            versions.append({**version, "evidence_role": label})
+        return {**context, "versions": versions, "repair_targets": repair_targets,
                 "reviewable_operation_ids": context.get("reviewable_operation_ids", []),
                 "limits": {key: getattr(self.config, key) for key in (
                     "max_claims_per_call", "max_dependencies_per_call",
@@ -221,8 +235,18 @@ class DependencyInducer:
     def verification_payload(payload):
         schema = VerificationResult.model_json_schema()
         schema["properties"].pop("sufficient_paths", None)
+        if "premise_evidence" in payload:
+            premise_ids = {ref["id"] for ref in payload["dependency"]["premise_refs"]}
+            payload = {k: payload[k] for k in ("target", "dependency", "input_policy", "premise_evidence",
+                                               "source_cutoff", "evaluation_time") if k in payload} | {
+                "counterevidence": [{k:v for k,v in item.items() if k not in {"revision", "created_at"}}
+                    for item in payload.get("versions", []) if item["id"] not in premise_ids
+                    and item.get("resolution", {}).get("usable")]}
         return {**payload, "output_schema": schema,
                 "evidence_policy_check": (
+                    "premise_evidence has already passed source, availability and reference checks. "
+                    "Judge whether those premises JOINTLY imply this conclusion. Do not repeat a vote on "
+                    "whether an authorized premise is plausible in the real world. "
                     "Evaluate the proposed decision in the world defined by input_policy and the supplied sources, "
                     "not pretrained real-world truth. Under newer_source, a single later source can override an "
                     "older conflicting value of the same attribute: no extra corroboration is required merely "

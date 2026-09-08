@@ -23,6 +23,13 @@ class BenchmarkRunConfig:
     judge_workers: int = 4
     check_workers: int = 8
     dry_run: bool = False
+    model_profile: str | None = None
+    api_key_env: str = "OPENAI_API_KEY"
+    judge_base_url: str | None = None
+    judge_api_key_env: str | None = None
+    embedding_base_url: str | None = None
+    embedding_api_key_env: str | None = None
+    embedding_model: str = "text-embedding-3-small"
 
     def saved_config(self) -> dict:
         return {key: str(value) if isinstance(value, Path) else value

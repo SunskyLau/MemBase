@@ -13,6 +13,10 @@ class OurMemConfig(MemBaseConfig):
     judge_model: str = "gpt-4.1-mini"
     api_key: str = Field(default="", repr=False, exclude=True)
     base_url: str = "https://api.openai.com/v1"
+    embedding_api_key: str = Field(default="", repr=False, exclude=True)
+    embedding_base_url: str | None = None
+    judge_api_key: str = Field(default="", repr=False, exclude=True)
+    judge_base_url: str | None = None
     b_memory: int = Field(default=8, ge=1)
     max_batch_tokens: int = Field(default=6000, ge=1)
     w_context: int = Field(default=8, ge=0)
@@ -28,9 +32,7 @@ class OurMemConfig(MemBaseConfig):
     max_dependencies_per_call: int = Field(default=24, ge=1)
     max_repair_targets_per_call: int = Field(default=8, ge=1)
     max_generation_calls_per_update: int = Field(default=8, ge=1)
-    max_read_rounds: int = Field(default=4, ge=1)
-    max_read_queries_per_round: int = Field(default=4, ge=1)
-    max_aggregate_scan_tokens: int = Field(default=64000, ge=0)
+    top_k: int = Field(default=20, ge=1)
     max_evidence_tokens: int = Field(default=8000, ge=1)
     max_llm_retries: int = Field(default=2, ge=0)
     memory_temperature: float = 0.0
@@ -40,17 +42,13 @@ class OurMemConfig(MemBaseConfig):
     transport_retry_window: float = Field(default=900.0, ge=0)
     short_references: bool = True
     k_dense: dict[str, int] = Field(default_factory=lambda: {
-        "reconcile": 8, "derive": 16, "validate": 8,
-        "read": 20, "history": 20, "aggregate": 20, "source": 8})
+        "reconcile": 8, "derive": 16, "validate": 8})
     k_bm25: dict[str, int] = Field(default_factory=lambda: {
-        "reconcile": 8, "derive": 16, "validate": 8,
-        "read": 20, "history": 20, "aggregate": 20, "source": 8})
+        "reconcile": 8, "derive": 16, "validate": 8})
     k_time: dict[str, int] = Field(default_factory=lambda: {
-        "reconcile": 2, "derive": 4, "validate": 2,
-        "read": 4, "history": 4, "aggregate": 4, "source": 0})
+        "reconcile": 2, "derive": 4, "validate": 2})
     max_candidates: dict[str, int] = Field(default_factory=lambda: {
-        "reconcile": 16, "derive": 32, "validate": 16,
-        "read": 40, "history": 40, "aggregate": 40, "source": 8})
+        "reconcile": 16, "derive": 32, "validate": 16})
 
     def get_llm_models(self) -> list[str]:
         return list(dict.fromkeys([self.model_name, self.answer_model, self.judge_model]))

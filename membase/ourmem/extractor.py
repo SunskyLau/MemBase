@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import ConfigDict, Field
 
 from .models import InputPolicy, PremiseRef, Record, Source, SourceSpan, TimeScope
+from .llm import RecoverableModelError
 
 
 FACT_EXTRACTION_PROMPT = """Extract memory-relevant propositions from target source messages.
@@ -69,6 +70,15 @@ Rules:
   hypothetical, external instruction or assistant repetition. Keep the control span;
   do not separately assert the sensitive value named in that control command.
 - Do not generate persistent ids, relationships or statuses.
+"""
+
+QUOTE_REPAIR_PROMPT = """Repair only the evidence quotations for the listed extraction items.
+The fact content, source identity, modality and time are fixed. Copy an exact substring
+from the supplied source, including its original spelling and punctuation. Do not correct
+typos in quotations. Select the smallest sufficient unambiguous span; use quote_occurrence
+only to distinguish identical occurrences. Do not use future text to ground an earlier fact.
+Return {"repairs":[{"index":0,"quote":"exact text","quote_occurrence":null,
+"context_quotes":[]}]} with only the quotations you can locate. Do not invent a quote.
 """
 
 
@@ -167,16 +177,21 @@ class FactExtractor:
         context = [source for source in context_sources if source.id not in target_ids]
         width = min(self.config.w_context, len(context))
         last_result = None
+        quote_repaired = False
         while True:
             visible_context = context[-width:] if width else []
             visible_ids = target_ids | {source.id for source in visible_context}
+            quote_failures, raw_output = {}, {}
 
             def validate(raw: dict) -> ExtractionResult:
-                if not isinstance(raw.get("facts"), list) or not isinstance(raw.get("unresolved", []), list):
+                if not isinstance(raw, dict) or not isinstance(raw.get("facts"), list) or not isinstance(raw.get("unresolved", []), list):
                     raise ValueError("Extraction needs facts and unresolved arrays")
+                raw_output.clear()
+                raw_output.update(raw)
+                quote_failures.clear()
                 drafts = []
                 unresolved_items = []
-                for item in raw["facts"]:
+                for item_index, item in enumerate(raw["facts"]):
                     try:
                         fact = ExtractedFact.model_validate(item)
                     except ValueError as error:
@@ -224,6 +239,9 @@ class FactExtractor:
                             source_id=source.id, intent=fact.intent,
                         ))
                     except ValueError as error:
+                        if fact.source_id in target_ids and any(word in str(error) for word in
+                                ("exact substring", "Ambiguous quote", "quote_occurrence")):
+                            quote_failures[item_index] = {"fact": item, "error": str(error)}
                         unresolved_items.extend(UnresolvedExtraction(source_id=s.id, quote=s.content[ranges[s.id][0]:ranges[s.id][1]],
                             reason=str(error), context_needed=False) for s in sources
                             if fact.source_id not in target_ids or fact.source_id == s.id)
@@ -270,6 +288,28 @@ class FactExtractor:
                     return self._split_piece(sources, context_sources, input_policy, ranges)
                 return ExtractionResult(unresolved=[UnresolvedExtraction(source_id=sources[0].id,
                     quote=sources[0].content, reason=str(error), context_needed=False)])
+            if quote_failures and not quote_repaired:
+                quote_repaired = True
+                failed, original = dict(quote_failures), dict(raw_output)
+                repair_payload = {"items": [{"index": i, **entry} for i, entry in failed.items()],
+                    "targets": payload["targets"], "preceding_context": payload["preceding_context"]}
+                def validate_repairs(raw):
+                    if not isinstance(raw, dict) or not isinstance(raw.get("repairs"), list):
+                        raise ValueError("Quote repair must return a repairs array")
+                    for entry in raw["repairs"]:
+                        if not isinstance(entry, dict) or entry.get("index") not in failed or not isinstance(entry.get("quote"), str):
+                            raise ValueError("Quote repair must reference a listed index and exact quotation")
+                    return raw["repairs"]
+                try:
+                    repairs = request_json(self.llm, self.config, "extract_quote", QUOTE_REPAIR_PROMPT,
+                                           repair_payload, validator=validate_repairs)
+                    facts = list(original["facts"])
+                    for entry in repairs:
+                        facts[entry["index"]] = {**facts[entry["index"]], **{k: entry[k] for k in
+                            ("quote", "quote_occurrence", "context_quotes") if k in entry}}
+                    result = validate({**original, "facts": facts})
+                except RecoverableModelError:
+                    pass  # 保留已有成功项与未决原文，不重抽整批。
             if not any(item.context_needed for item in result.unresolved) or width >= min(len(context), self.config.w_context_max):
                 return result
             last_result = result

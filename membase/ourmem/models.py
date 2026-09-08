@@ -208,13 +208,15 @@ class EvidenceBundle(Record):
     text: str = ""
     refs: list[PremiseRef] = Field(default_factory=list)
     version_ids: list[str] = Field(default_factory=list)
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    links: list[dict[str, Any]] = Field(default_factory=list)
     complete: bool = True
     reason: str = ""
 
 
 class PreparedContext(Record):
     context: str = ""
-    resolution_status: Literal["resolved", "unknown", "conflict", "deleted", "incomplete"] = "incomplete"
+    resolution_status: Literal["resolved", "unknown", "conflict", "deleted", "incomplete", "not_assessed"] = "incomplete"
     reason: str = ""
     evidence_refs: list[PremiseRef] = Field(default_factory=list)
     coverage: dict[str, Any] = Field(default_factory=dict)

@@ -31,6 +31,7 @@ _LOCAL_FILES = (
     "membase/inference_utils/prompts.py",
     "membase/inference_utils/model_client.py", "membase/utils/tokenization.py",
     "membase/inference_utils/reference_codec.py",
+    "membase/configs/model_profiles.py",
     "membase/utils/read_revision.py",
 )
 

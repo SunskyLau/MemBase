@@ -378,6 +378,40 @@ class MaintenanceEngine:
         evaluation = self._evaluation(snapshot, query_time, source_cutoff)
         return {version_id: evaluation.evaluate(version_id) for version_id in evaluation.view.versions}
 
+    def reading_references(self, evaluation: _Evaluation) -> dict[str, PremiseRef]:
+        """历史记录要在其实际依据成立时可用；纠错和删除不能被旧时间绕过。"""
+        points = {}
+        def origin(version_id):
+            if version_id in points:
+                return points[version_id]
+            version = evaluation.view.versions[version_id]
+            positions = []
+            for dep in evaluation.supports[version_id]:
+                for ref in dep.premise_refs:
+                    if ref.type == "SOURCE":
+                        source = evaluation.view.sources[ref.id]
+                        positions.append(TimePoint(date=source.mention_time, order=source.source_order, offset=ref.span.end))
+                    else:
+                        positions.extend([ref.at_time] if ref.type == "HISTORICAL" else origin(ref.id))
+            if version.valid_time.start is not None:
+                positions.append(version.valid_time.start)
+            # 检查已知依据边界，不枚举前提组合；晚到的另一条或路径不能抹去较早历史。
+            points[version_id] = list({canonical_json(p): p for p in positions}.values())
+            return points[version_id]
+        result = {}
+        for version in evaluation.view.versions.values():
+            if not evaluation.content_visible(version.id):
+                continue
+            current = evaluation.evaluate(version.id)
+            if current.usable:
+                result[version.id] = PremiseRef(type="CURRENT", id=version.id)
+            elif current.reason not in {"deleted", "deleted_evidence", "corrected", "not_yet_applicable", "conflict"}:
+                for point in sorted(origin(version.id), key=lambda p: (p.order if p.order is not None else -1, p.offset), reverse=True):
+                    if compare_time(point, evaluation.now) != 1 and evaluation.evaluate(version.id, point).usable:
+                        result[version.id] = PremiseRef(type="HISTORICAL", id=version.id, at_time=point)
+                        break
+        return result
+
     def depth(self, version_id: str, snapshot=None, source_cutoff=None) -> int:
         view = self.store.view(snapshot, source_cutoff=source_cutoff)
         return validate_graph(view.sources, view.versions, view.dependencies, self.store.max_claim_depth)[version_id]
@@ -527,9 +561,12 @@ class MaintenanceEngine:
 
     def evidence(self, version_id: str, query_time: TimePoint | str | None = None,
                  snapshot: Snapshot | int | None = None, source_cutoff: int | None = None,
-                 max_tokens: int | None = None, token_counter=None) -> EvidenceBundle:
+                 max_tokens: int | None = None, token_counter=None, bundle_cost=None) -> EvidenceBundle:
         evaluation = self._evaluation(snapshot, query_time, source_cutoff)
         path_cache: dict[tuple[str, str], EvidenceBundle] = {}
+        if token_counter is None:
+            from .tokenization import count_tokens
+            token_counter = count_tokens
         def source_evidence(ref: PremiseRef, point: TimePoint) -> EvidenceBundle:
             if not evaluation.ref_available(ref, point):
                 return EvidenceBundle(complete=False, reason="source_unavailable")
@@ -541,6 +578,7 @@ class MaintenanceEngine:
                              + source.content[span.start:span.end])
             refs = [ref]
             version_ids = []
+            nodes, links = [], []
             source = evaluation.view.sources[ref.id]
             for original in source.generation_refs:
                 child = expand_ref(original, point)
@@ -549,7 +587,9 @@ class MaintenanceEngine:
                 texts.append(child.text)
                 refs.extend(child.refs)
                 version_ids.extend(child.version_ids)
-            return EvidenceBundle(text="\n".join(texts), refs=refs, version_ids=version_ids)
+                nodes.extend(child.nodes)
+                links.extend(child.links)
+            return EvidenceBundle(text="\n".join(texts), refs=refs, version_ids=version_ids, nodes=nodes, links=links)
         def expand_ref(ref: PremiseRef, point: TimePoint) -> EvidenceBundle:
             if ref.type == "SOURCE":
                 return source_evidence(ref, point)
@@ -574,6 +614,10 @@ class MaintenanceEngine:
                 text += "\n".join(dict.fromkeys(part.text for part in parts))
                 refs = [ref for part in parts for ref in part.refs]
                 version_ids = [target_id, *(node for part in parts for node in part.version_ids)]
+                nodes = [{"version_id": target_id, "at_time": point.model_dump(mode="json")},
+                         *(node for part in parts for node in part.nodes)]
+                links = [{"dependency_id": dep.id, "at_time": point.model_dump(mode="json")},
+                         *(link for part in parts for link in part.links)]
                 if target.revision:
                     revision_point = target.revision.effective_time or point
                     evidence_parts = [expand_ref(ref, revision_point) for ref in target.revision.evidence_refs]
@@ -584,19 +628,20 @@ class MaintenanceEngine:
                             text += "\n" + evidence.text
                             refs.extend(evidence.refs)
                             version_ids.extend(evidence.version_ids)
+                            nodes.extend(evidence.nodes)
+                            links.extend(evidence.links)
                     else:
                         # 新值有直接依据时可继续成立，但不把已被推翻的变化解释当作证明。
                         text += "\nRevision interpretation unavailable or requires review."
                 choices.append(EvidenceBundle(text=text, refs=list({canonical_json(ref): ref for ref in refs}.values()),
-                                              version_ids=list(dict.fromkeys(version_ids))))
-            bundle = min(choices, key=lambda item: len(item.text)) if choices else EvidenceBundle(complete=False, reason="no_complete_path")
+                                              version_ids=list(dict.fromkeys(version_ids)),
+                                              nodes=list({canonical_json(n): n for n in nodes}.values()),
+                                              links=list({canonical_json(n): n for n in links}.values())))
+            bundle = min(choices, key=lambda item: (bundle_cost(item) if bundle_cost else token_counter(item.text), item.text)) if choices else EvidenceBundle(complete=False, reason="no_complete_path")
             path_cache[key] = bundle
             return bundle
         bundle = expand(version_id, evaluation.now)
         if max_tokens is not None:
-            if token_counter is None:
-                from .tokenization import count_tokens
-                token_counter = count_tokens
             if token_counter(bundle.text) > max_tokens:
                 return EvidenceBundle(complete=False, reason="evidence_budget_exceeded")
         return bundle

@@ -17,16 +17,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from membase.utils.experiment_progress import ExperimentProgress, duration, read_record
+from membase.configs.model_profiles import load_environment, redact
 
 
 class Console:
     def __init__(self, run_dir: Path):
         self.run_dir = run_dir
-        self.key = os.environ.get("OPENAI_API_KEY", "")
 
     def write(self, text: str) -> None:
-        if self.key:
-            text = text.replace(self.key, "[REDACTED]")
+        text = redact(text)
         print(text, end="", flush=True)
         # 原运行器拒绝非空的新目录，因此只在它创建清单后附加控制台日志。
         if (self.run_dir / "config.json").is_file():
@@ -129,6 +128,7 @@ def supervise(command: list[str], run_dir: Path, interval: float) -> int:
 
 
 def main() -> int:
+    load_environment()
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--progress-interval", type=float, default=10)
     parser.add_argument("--watch", type=Path)
@@ -144,8 +144,7 @@ def main() -> int:
         try:
             while True:
                 for line in progress.poll():
-                    key = os.environ.get("OPENAI_API_KEY", "")
-                    print(line.replace(key, "[REDACTED]") if key else line, flush=True)
+                    print(redact(line), flush=True)
                 if options.once:
                     return 0
                 time.sleep(options.progress_interval)
@@ -161,6 +160,7 @@ def main() -> int:
     location.add_argument("--output-dir", type=Path)
     location.add_argument("--run-id", default="")
     location.add_argument("--run-dir", type=Path)
+    location.add_argument("--model-profile", choices=["gpt", "qwen"])
     args, _ = location.parse_known_args(remaining)
     if args.run_dir is not None:
         return supervise(command, args.run_dir.resolve(), options.progress_interval)
@@ -171,7 +171,8 @@ def main() -> int:
         parser.error("run-id 必须是单个目录名")
     if not args.run_id:
         command += ["--run-id", run_id]
-    return supervise(command, args.output_dir.resolve() / run_id, options.progress_interval)
+    directory_name = run_id + (f"_{args.model_profile}" if args.model_profile else "")
+    return supervise(command, args.output_dir.resolve() / directory_name, options.progress_interval)
 
 
 if __name__ == "__main__":

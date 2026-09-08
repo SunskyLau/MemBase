@@ -9,10 +9,14 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from membase.utils.benchmark_files import read_json
 
 
 def main(argv=None, *, stages=None) -> int:
+    from membase.configs.model_profiles import load_environment, add_profile_arguments, apply_profile
+    load_environment()
     parser = argparse.ArgumentParser(description=__doc__)
+    add_profile_arguments(parser)
     parser.add_argument("--benchmark", choices=["locomo", "longmemeval", "memoryagentbench", "meme"], required=True)
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--mode", choices=["smoke", "core", "full", "6k"], default="core",
@@ -21,10 +25,10 @@ def main(argv=None, *, stages=None) -> int:
     parser.add_argument("--run-id", default="", help="留空时以 UTC 时间命名；相同配置可续跑")
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--upstream-dir", type=Path)
-    parser.add_argument("--answer-model", default="gpt-4.1-mini")
-    parser.add_argument("--internal-model", default="gpt-4.1-mini")
-    parser.add_argument("--judge-model", default="gpt-4.1-mini")
-    parser.add_argument("--base-url", default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
+    parser.add_argument("--answer-model")
+    parser.add_argument("--internal-model")
+    parser.add_argument("--judge-model")
+    parser.add_argument("--base-url")
     parser.add_argument("--top-k", type=int)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--parallel-jobs", type=int, default=1)
@@ -40,6 +44,10 @@ def main(argv=None, *, stages=None) -> int:
     parser.add_argument("--budget-ledger", type=Path, help="多个受限验证共享的 SQLite 请求计数")
     parser.add_argument("--locomo-judge", action="store_true", help="额外报告 LoCoMo 模型评判；不替代官方 F1")
     args = parser.parse_args(argv)
+    try:
+        routing = apply_profile(args)
+    except ValueError as error:
+        parser.error(str(error))
     if args.mode == "6k" and args.benchmark != "memoryagentbench":
         parser.error("6k 模式仅适用于 MemoryAgentBench")
 
@@ -55,13 +63,11 @@ def main(argv=None, *, stages=None) -> int:
     if args.baseline in {"ourmem", "amem"}:
         from membase.datasets.official import default_paths
         default_data, default_upstream = default_paths(args.benchmark)
-        if args.baseline == "ourmem" and args.top_k is not None:
-            parser.error("OurMem 使用分阶段候选预算，不接受单一 --top-k；请使用 --memory-config")
         if any(value is not None and value < 0 for value in (args.max_llm_requests, args.max_embedding_requests)):
             parser.error("请求上限必须非负；不设置表示不限制")
         from membase.runners.protocol import OfficialRunConfig
         config_type = OfficialRunConfig
-        extra = dict(embedding_model=args.embedding_model, memory_config=args.memory_config,
+        extra = dict(memory_config=args.memory_config,
                      seed=args.seed, max_llm_requests=args.max_llm_requests,
                      max_embedding_requests=args.max_embedding_requests,
                      budget_ledger=args.budget_ledger, locomo_judge=args.locomo_judge)
@@ -69,10 +75,16 @@ def main(argv=None, *, stages=None) -> int:
         module = memoryagentbench if args.benchmark == "memoryagentbench" else meme
         default_data, default_upstream = module.DEFAULT_DATA_ROOT, module.DEFAULT_UPSTREAM
         config_type, extra = BenchmarkRunConfig, {}
-    top_k = args.top_k if args.top_k is not None else (10 if args.benchmark == "memoryagentbench" else 5)
+    default_k = 10 if args.benchmark == "memoryagentbench" else 5
+    if args.baseline == "ourmem":
+        settings = read_json(args.memory_config) if args.memory_config else {}
+        default_k = settings.get("top_k", 20)
+    top_k = args.top_k if args.top_k is not None else default_k
     if min(top_k, args.parallel_jobs, args.workers, args.judge_workers, args.check_workers) < 1:
         parser.error("检索数量和并发数必须为正整数")
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    if args.model_profile:
+        run_id += f"_{args.model_profile}"
     if Path(run_id).name != run_id or run_id in {".", ".."}:
         parser.error("run-id 必须是单个目录名")
     config = config_type(
@@ -83,12 +95,14 @@ def main(argv=None, *, stages=None) -> int:
         internal_model=args.internal_model, judge_model=args.judge_model, base_url=args.base_url,
         top_k=top_k, temperature=args.temperature, parallel_jobs=args.parallel_jobs,
         workers=args.workers, judge_workers=args.judge_workers, check_workers=args.check_workers,
-        dry_run=args.dry_run, **extra,
+        dry_run=args.dry_run, embedding_model=args.embedding_model, **routing, **extra,
     )
     return execute_config(config, stages=stages)
 
 
 def execute_config(config, *, stages=None):
+    from membase.configs.model_profiles import load_environment, redact
+    load_environment()
     from membase.runners import memoryagentbench as mab_runner, meme as meme_runner
     runner = mab_runner if config.benchmark == "memoryagentbench" else meme_runner
     if config.baseline in {"ourmem", "amem"}:
@@ -110,9 +124,7 @@ def execute_config(config, *, stages=None):
                     fail_run(config.run_dir, exc)
             except (OSError, ValueError):
                 pass
-        text = str(exc)
-        if os.environ.get("OPENAI_API_KEY"):
-            text = text.replace(os.environ["OPENAI_API_KEY"], "[REDACTED]")
+        text = redact(str(exc))
         print(f"实验未完成：{text}", file=sys.stderr)
         return 1
     return 0

@@ -9,7 +9,7 @@ import sys
 
 from ..datasets import meme as data
 from ..evaluation import meme as evaluation
-from ..utils.benchmark_files import preserve_incomplete, read_json, write_json
+from ..utils.benchmark_files import preserve_incomplete, read_json, write_json, sha256_file
 from ..utils.experiment import child_environment, finish_run, require_runtime, run_process, start_run
 from .benchmark import BenchmarkRunConfig
 
@@ -48,9 +48,11 @@ def run_stage(config: BenchmarkRunConfig, variant: str, smoke: bool) -> dict | N
                 preserve_incomplete(path)
         pending.append((f"episode_{data.episode_key(ep)}.json", data.episode_path(config.data_root, variant, ep)))
 
-    env = child_environment(config.base_url)
-    env["PYTHONPATH"] = str(config.upstream_dir / "code")
-    env["TIKTOKEN_CACHE_DIR"] = str(stage_dir / "cache/tiktoken")
+    env = child_environment(config.base_url, config.api_key_env)
+    judge_env = child_environment(config.judge_base_url or config.base_url, config.judge_api_key_env or config.api_key_env)
+    for values in (env, judge_env):
+        values["PYTHONPATH"] = str(config.upstream_dir / "code")
+        values["TIKTOKEN_CACHE_DIR"] = str(stage_dir / "cache/tiktoken")
     if pending:
         inputs = input_directory(stage_dir, "answers", pending, config.dry_run)
         module = "eval.in_context_baseline" if baseline == "in_context" else "eval.run_agent"
@@ -60,6 +62,14 @@ def run_stage(config: BenchmarkRunConfig, variant: str, smoke: bool) -> dict | N
             command += ["--agent-type", baseline, "--internal-model", config.internal_model]
         if baseline in {"bm25", "dense"}:
             command += ["--top-k", str(config.top_k)]
+        if baseline == "dense" and config.model_profile:
+            import os
+            env.update(MEMBASE_EMBEDDING_API_KEY=os.environ.get(config.embedding_api_key_env or config.api_key_env, ""),
+                       MEMBASE_EMBEDDING_BASE_URL=config.embedding_base_url or config.base_url,
+                       MEMBASE_EMBEDDING_MODEL=config.embedding_model)
+            command = [sys.executable, str(Path(__file__).resolve().parents[2] / "scripts/run_native_benchmark.py"),
+                       "--benchmark", "meme", "--upstream", str(config.upstream_dir), "--module", module,
+                       "--", *command[3:]]
         run_process(command, stage_dir / "work", stage_dir / "logs/answers.log",
                     env=env, dry_run=config.dry_run)
 
@@ -67,7 +77,7 @@ def run_stage(config: BenchmarkRunConfig, variant: str, smoke: bool) -> dict | N
         command = [sys.executable, "-m", "eval.judge", "-d", str(stage_dir / "inputs/pending_judges"),
                    "-o", str(judge_dir), "--judge-model", config.judge_model,
                    "-w", str(config.judge_workers), "--check-workers", str(config.check_workers)]
-        run_process(command, stage_dir / "work", stage_dir / "logs/judge.log", env=env, dry_run=True)
+        run_process(command, stage_dir / "work", stage_dir / "logs/judge.log", env=judge_env, dry_run=True)
         print(f"预期：{variant}{' smoke' if smoke else ''}，{len(episodes)} 个样本及全部前后问题")
         return None
 
@@ -109,7 +119,7 @@ def run_stage(config: BenchmarkRunConfig, variant: str, smoke: bool) -> dict | N
                    "--judge-model", config.judge_model, "-w", str(config.judge_workers),
                    "--check-workers", str(config.check_workers)]
         try:
-            run_process(command, stage_dir / "work", stage_dir / "logs/judge.log", env=env)
+            run_process(command, stage_dir / "work", stage_dir / "logs/judge.log", env=judge_env)
         except RuntimeError as exc:
             failure = exc
 
@@ -141,9 +151,14 @@ def run(config: BenchmarkRunConfig) -> dict | None:
             imports += ["bm25s"]
         if config.baseline == "md_flat":
             imports += ["dotenv"]
-        require_runtime(imports)
+        require_runtime(imports, config.api_key_env)
+        from ..configs.model_profiles import credential
+        credential(config.judge_api_key_env or config.api_key_env)
+        if config.baseline == "dense":
+            credential(config.embedding_api_key_env or config.api_key_env)
         start_run(config.run_dir, config.saved_config(),
-                  {"upstream_commit": data.UPSTREAM_COMMIT, "data": prepared})
+                  {"upstream_commit": data.UPSTREAM_COMMIT, "data": prepared,
+                   "transport_adapter": sha256_file(Path(__file__).with_name("native_transport.py"))})
     summaries = {}
     for variant, smoke in data.stages(config.mode):
         key = f"{variant}_smoke" if smoke else variant

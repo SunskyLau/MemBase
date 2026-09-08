@@ -11,8 +11,8 @@ from typing import Callable
 
 import numpy as np
 
-from .maintenance import MaintenanceEngine, _Evaluation, compare_time
-from .models import MemoryVersion, Snapshot, Source, SourceSpan, TimePoint
+from .maintenance import MaintenanceEngine, _Evaluation
+from .models import MemoryVersion, PremiseRef, Snapshot, Source, SourceSpan, TimePoint
 from .store import OurMemStore
 from .tokenization import count_tokens, get_encoder
 
@@ -27,6 +27,7 @@ class RetrievalCandidate:
     source_id: str | None = None
     span: SourceSpan | None = None
     mandatory: bool = False
+    members: tuple[PremiseRef, ...] = ()
 
 
 def _tokens(text: str) -> list[str]:
@@ -46,6 +47,7 @@ class MemoryCandidateRetriever:
         self._index_key = None
         self._index = None
         self._record_vectors = {}
+        self._read_index_key = None
 
     def _count(self, text: str) -> int:
         if self._token_counter:
@@ -89,9 +91,7 @@ class MemoryCandidateRetriever:
                 if not evaluation.content_visible(version.id):
                     continue
                 state = evaluation.evaluate(version.id)
-                if mode in {"derive", "read", "aggregate"} and state.status in {"superseded", "deleted"}:
-                    continue
-                if mode in {"derive", "read", "aggregate"} and state.reason in {"expired", "not_yet_applicable"}:
+                if mode in {"derive", "validate"} and not state.usable:
                     continue
                 items.append(RetrievalCandidate(id=version.id, kind="memory", text=version.content, record=version))
         for source in sorted(evaluation.view.sources.values(), key=lambda item: item.source_order):
@@ -259,34 +259,58 @@ class MemoryCandidateRetriever:
                            "source_tokens": sum(self._count(item.text) for item in result if item.kind == "source")}
         return result
 
-    def source_page(self, cursor: int = 0, page_tokens: int | None = None, *, snapshot=None,
-                    source_cutoff=None, conversation_id: str | None = None,
-                    start_time: TimePoint | None = None, end_time: TimePoint | None = None) -> tuple[list[RetrievalCandidate], int | None]:
-        """真实来源分页；游标遍历完整范围，与 Top-k 和语义查询轮数无关。"""
-        evaluation = _Evaluation(self.store.view(snapshot, source_cutoff=source_cutoff))
-        chunks = self._items("source", evaluation)
-        chunks = [item for item in chunks if conversation_id is None or item.record.conversation_id == conversation_id]
-        if start_time or end_time:
-            def in_range(item):
-                point = TimePoint(order=item.record.source_order)
-                if item.record.mention_time:
-                    try:
-                        point = TimePoint(date=item.record.mention_time, order=item.record.source_order)
-                    except ValueError:
-                        pass
-                left, right = compare_time(point, start_time), compare_time(point, end_time)
-                return not (left is not None and left < 0 or right is not None and right >= 0)
-            chunks = [item for item in chunks if in_range(item)]
-        limit = page_tokens if page_tokens is not None else self.config.max_context_tokens
-        page, consumed = [], 0
-        index = cursor
-        while index < len(chunks):
-            size = self._count(chunks[index].text)
-            if consumed + size > limit:
-                if not page:
-                    raise ValueError("Source page budget cannot fit its next complete chunk")
-                break
-            page.append(chunks[index])
-            consumed += size
-            index += 1
-        return page, index if index < len(chunks) else None
+    def search_memories(self, query: str, snapshot=None, query_time=None, top_k: int | None = None):
+        """一次原始查询：按版本匹配、按记忆条目计数；原文不独立参与召回。"""
+        import bm25s
+        k = self.config.top_k if top_k is None else top_k
+        if k < 1:
+            raise ValueError("top_k must be positive")
+        evaluation = _Evaluation(self.store.view(snapshot), query_time)
+        key = (self.store.data_seq, evaluation.view.sequence, evaluation.view.source_cutoff, str(evaluation.now))
+        if self._read_index_key != key:
+            refs = self.maintenance.reading_references(evaluation)
+            items = [RetrievalCandidate(id=v.id, kind="memory", text=v.content, record=v)
+                     for v in evaluation.view.versions.values() if v.id in refs]
+            sparse = bm25s.BM25(method="lucene", idf_method="lucene", k1=1.5, b=0.75, backend="numpy")
+            if items:
+                sparse.index([_tokens(item.text) for item in items], show_progress=False)
+            self._read_index_key, self._read_index = key, (items, refs, sparse)
+        items, refs, sparse = self._read_index
+        self.last_trace = {"mode": "hybrid", "queries": [query], "eligible_versions": len(items),
+                           "top_k": k, "per_channel_groups": 2 * k, "rrf_c": self.config.rrf_c}
+        if not items:
+            self.last_trace["returned"] = 0
+            return []
+        self._query_cache.clear()
+        matrix, vectors = self._prepare_vectors(items, [query])
+        similarities = matrix @ vectors[0]
+        dense = sorted(range(len(items)), key=lambda i: (-float(similarities[i]), items[i].id))
+        lexical = []
+        tokens = _tokens(query)
+        if tokens:
+            indices, values = sparse.retrieve([tokens], k=len(items), show_progress=False)
+            lexical = [int(index) for index, value in zip(indices[0], values[0]) if value > 0]
+        scores, version_scores = defaultdict(float), defaultdict(float)
+        for ranking in (dense, lexical):
+            seen = set()
+            for rank, index in enumerate(ranking, 1):
+                item = items[index]
+                version_scores[item.id] += 1 / (self.config.rrf_c + rank)
+                family = item.record.memory_key
+                if family in seen:
+                    continue
+                seen.add(family)
+                scores[family] += 1 / (self.config.rrf_c + len(seen))
+                if len(seen) == 2 * k:
+                    break
+        families = defaultdict(list)
+        for item in items:
+            families[item.record.memory_key].append(item)
+        result = []
+        for family in sorted(scores, key=lambda f: (-scores[f], f))[:k]:
+            members = sorted(families[family], key=lambda v: (-version_scores[v.id], v.id))
+            best = members[0]
+            result.append(RetrievalCandidate(id=family, kind="memory_group", text=best.text, record=best.record,
+                score=scores[family], members=tuple(refs[item.id] for item in members)))
+        self.last_trace["returned"] = len(result)
+        return result

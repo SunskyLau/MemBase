@@ -177,17 +177,17 @@ class OurMemSystem:
         return self._snapshot_token(namespace, snapshot.id)
 
     def prepare_evidence(self, query: str, namespace: str, snapshot_id: str,
-                         query_time: str | None = None) -> PreparedContext:
+                         query_time: str | None = None, *, top_k: int | None = None) -> PreparedContext:
         from .reader import MemoryReader
         state = self._state(namespace)
         number = self._snapshot_number(namespace, snapshot_id)
         state.store.snapshot(number)
         reader = MemoryReader(state.store, state.retriever, state.maintenance, self.client, self.config)
-        return reader.prepare(query, number, query_time)
+        return reader.prepare(query, number, query_time, top_k=top_k)
 
     def answer(self, query: str, namespace: str, snapshot_id: str,
-               query_time: str | None = None, answer_template: str | None = None) -> AnswerResult:
-        prepared = self.prepare_evidence(query, namespace, snapshot_id, query_time)
+               query_time: str | None = None, answer_template: str | None = None, *, top_k: int | None = None) -> AnswerResult:
+        prepared = self.prepare_evidence(query, namespace, snapshot_id, query_time, top_k=top_k)
         if prepared.resolution_status == "deleted":
             return AnswerResult(**prepared.model_dump(), answer_text="I don't have that information.")
         template = answer_template or (

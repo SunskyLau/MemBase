@@ -36,7 +36,6 @@ class OfficialRunConfig(BenchmarkRunConfig):
         for key in ("parallel_jobs", "judge_workers"):
             values.pop(key)
         if self.baseline == "ourmem":
-            values.pop("top_k")
             values.pop("workers")
             values.pop("check_workers")
         values["temperature"] = self.temperature if self.benchmark == "memoryagentbench" else 0
@@ -82,7 +81,8 @@ def preview(config, stages=("construction", "search", "evaluation")):
     overrides = read_json(config.memory_config) if config.memory_config else {}
     result = {"dry_run": True, "config": config.saved_config(), "matrix": matrix,
               "stages": list(stages), "protocol": PROTOCOL_VERSION,
-              "memory": ({"storage": "independent SQLite per sample", "max_claim_depth": overrides.get("max_claim_depth", 5)}
+              "memory": ({"storage": "independent SQLite per sample", "max_claim_depth": overrides.get("max_claim_depth", 5),
+                          "top_k": config.top_k, "reader": "single hybrid retrieval with grouped versions and support expansion"}
                          if config.baseline == "ourmem" else {"storage": "isolated Chroma + atomic state checkpoint",
                              "checkpoint_interval": overrides.get("checkpoint_interval", 8), "evo_threshold": overrides.get("evo_threshold", 100),
                              "top_k": config.top_k, "max_evidence_tokens": overrides.get("max_evidence_tokens", 8000)}),
@@ -134,25 +134,35 @@ class RunContext:
         from ..configs import CONFIG_MAPPING
         from ..inference_utils.model_client import ModelClient, ModelClientConfig, RequestBudget
         self.dataset_cls = DATASET_MAPPING[DATASET_NAMES[config.benchmark]]
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+        api_key = os.environ.get(config.api_key_env, "")
+        service_fields = {"embedding_base_url": config.embedding_base_url,
+                          "embedding_api_key": os.environ.get(config.embedding_api_key_env or config.api_key_env, ""),
+                          "judge_base_url": config.judge_base_url,
+                          "judge_api_key": os.environ.get(config.judge_api_key_env or config.api_key_env, "")}
+        if client is None:
+            from ..configs.model_profiles import credential
+            credential(config.api_key_env)
+            credential(config.embedding_api_key_env or config.api_key_env)
+            if config.benchmark in {"meme", "longmemeval"} or config.locomo_judge:
+                credential(config.judge_api_key_env or config.api_key_env)
         self.call_config = ModelClientConfig(model_name=config.internal_model, answer_model=config.answer_model,
                                              judge_model=config.judge_model, seed=config.seed,
-                                             embedding_model_name=config.embedding_model, api_key=api_key, base_url=config.base_url)
+                                             embedding_model_name=config.embedding_model, api_key=api_key, base_url=config.base_url,
+                                             **service_fields)
         if config.baseline == "ourmem":
             self.memory_config = CONFIG_MAPPING["OurMem"](**{
-                **self.overrides, "model_name": config.internal_model, "answer_model": config.answer_model,
+                **self.overrides, "top_k": config.top_k, "model_name": config.internal_model, "answer_model": config.answer_model,
                 "judge_model": config.judge_model, "seed": config.seed,
-                "embedding_model_name": config.embedding_model, "api_key": api_key, "base_url": config.base_url})
+                "embedding_model_name": config.embedding_model, "api_key": api_key, "base_url": config.base_url,
+                **service_fields})
             self.call_config = self.memory_config
         else:
             self.memory_config = CONFIG_MAPPING["A-MEM"](**{
                 **self.overrides, "user_id": "default", "llm_backend": "openai", "llm_model": config.internal_model,
                 "llm_api_key": api_key, "llm_base_url": config.base_url, "embedding_provider": "openai",
-                "retriever_name_or_path": config.embedding_model, "embedding_api_key": api_key,
-                "embedding_base_url": config.base_url, "preserve_unknown_time": True})
+                "retriever_name_or_path": config.embedding_model, "embedding_api_key": service_fields["embedding_api_key"],
+                "embedding_base_url": config.embedding_base_url or config.base_url, "preserve_unknown_time": True})
         self.owns_client = client is None
-        if self.owns_client and not self.call_config.api_key:
-            raise ValueError("请提供 OPENAI_API_KEY")
         start_run(config.run_dir, config.saved_config(), protocol)
         if config.baseline == "ourmem":
             write_json(config.run_dir / "execution.json", {"workers": config.workers, "check_workers": config.check_workers,

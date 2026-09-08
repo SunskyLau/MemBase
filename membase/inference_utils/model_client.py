@@ -34,6 +34,10 @@ class ModelClientConfig(BaseModel):
     embedding_model_name: str = "text-embedding-3-small"
     api_key: str = Field(default="", repr=False, exclude=True)
     base_url: str = "https://api.openai.com/v1"
+    embedding_api_key: str = Field(default="", repr=False, exclude=True)
+    embedding_base_url: str | None = None
+    judge_api_key: str = Field(default="", repr=False, exclude=True)
+    judge_base_url: str | None = None
     max_context_tokens: int = 16000
     max_model_output_tokens: int = 1000
     max_llm_retries: int = 2
@@ -202,6 +206,7 @@ class ModelClient:
         self._clock = clock
         self._log_lock = threading.Lock()
         self._tokenizer = None
+        self._role_backends = {}
 
     @property
     def backend(self):
@@ -218,9 +223,29 @@ class ModelClient:
             self._tokenizer = get_encoder()
         return len(self._tokenizer.encode(text, disallowed_special=()))
 
+    def backend_for(self, role: str):
+        # 注入的测试/自定义接口继续统一接管；真实服务按用途分流。
+        url = getattr(self.config, f"{role}_base_url", None)
+        if not self._owns_backend or not url:
+            return self.backend
+        key = getattr(self.config, f"{role}_api_key", "") or self.config.api_key
+        if (url, key) == (self.config.base_url, self.config.api_key):
+            return self.backend
+        with self._backend_lock:
+            identity = (url, key)
+            if identity not in self._role_backends:
+                from openai import OpenAI
+                self._role_backends[identity] = OpenAI(api_key=key, base_url=url,
+                    max_retries=0, timeout=self.config.request_timeout)
+            return self._role_backends[identity]
+
     def _safe(self, value: Any) -> Any:
         if isinstance(value, str):
-            return value.replace(self.config.api_key, "[REDACTED]") if self.config.api_key else value
+            for field in ("api_key", "embedding_api_key", "judge_api_key"):
+                secret = getattr(self.config, field, "")
+                if secret:
+                    value = value.replace(secret, "[REDACTED]")
+            return value
         if isinstance(value, dict):
             return {key: self._safe(item) for key, item in value.items()}
         if isinstance(value, list):
@@ -261,7 +286,7 @@ class ModelClient:
         input_count = sum(self.count_tokens(message["content"]) for message in messages) + 32
         if input_count > self.config.max_context_tokens:
             raise ContextLimitError(f"{stage} input {input_count} exceeds {self.config.max_context_tokens}")
-        backend = self.backend
+        backend = self.backend_for("judge") if stage == "judge" else self.backend
         request_id = self.budget.reserve("llm", stage, model)
         started = time.monotonic()
         usage = None
@@ -430,7 +455,7 @@ class ModelClient:
             kwargs = {"model": self.config.embedding_model_name, "input": batch}
             if timeout is not None:
                 kwargs["timeout"] = timeout
-            response = self.backend.embeddings.create(**kwargs)
+            response = self.backend_for("embedding").embeddings.create(**kwargs)
             usage = self._usage(response)
             ordered = sorted(response.data, key=lambda item: item.index)
             if [item.index for item in ordered] != list(range(len(batch))):
@@ -474,5 +499,7 @@ class ModelClient:
     def close(self) -> None:
         if self._backend is not None and self._owns_backend:
             self._backend.close()
+        for backend in self._role_backends.values():
+            backend.close()
         if self._owns_budget:
             self.budget.close()

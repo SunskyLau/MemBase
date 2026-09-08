@@ -181,10 +181,10 @@ class MemoryWriter:
             checked = self._candidates([draft.content, decision.identity_description],
                                        "reconcile", cutoff, prefix, mandatory=mandatory, staged=staged,
                                        request_builder=lambda context: request(context, True))
-            # NEW 只再查一次；第二次依然找不到即可由程序分配身份。
-            if set(checked["version_ids"]) - set(candidates["version_ids"]):
+            # 候选没变化不代表 NEW 正确；复核只看简短陈述，不再搬入全部原文。
+            if checked["versions"]:
                 decision = self.reconciler.reconcile(draft, checked["versions"], policy,
-                                                     identity_recheck=True, evidence_context=checked)
+                    identity_recheck=True, evidence_context=checked)
         return self._materialize(draft, decision, cutoff, token, staged), decision
 
     def maintain_change(self, changed_ids, source, input_policy, batch_id) -> MaintenanceReport:
@@ -350,10 +350,31 @@ class MemoryWriter:
         spans = {source_id: list(items) for source_id, items in (source_spans or {}).items()}
         spans.setdefault(prefix.source_id, []).append(prefix)
         stack = list(ids)
+        direct_version_ids = set(ids) & versions.keys()
+        source_facts = {}
+        for dependency in dependencies.values():
+            if dependency.effect == "SUPPORT" and all(ref.type == "SOURCE" for ref in dependency.premise_refs):
+                for ref in dependency.premise_refs:
+                    source_facts.setdefault(ref.id, []).append((dependency.target_version_id, ref.span))
         while stack:
             item = stack.pop()
             if item in view.sources:
+                if item in chosen_sources:
+                    continue
                 chosen_sources.add(item)
+                if item not in ids:
+                    continue
+                ranges = spans.get(item)
+                for version_id, quote in source_facts.get(item, []):
+                    if item == prefix.source_id and quote.end > prefix.end:
+                        continue
+                    if ranges and not any(quote.start < span.end and span.start < quote.end for span in ranges):
+                        continue
+                    stack.append(version_id)
+                    direct_version_ids.add(version_id)
+                    family = versions[version_id].memory_key
+                    stack.extend(v.id for v in versions.values() if v.memory_key == family
+                                 and v.id in view.versions and self.evaluator.evaluate(v.id, source_cutoff=cutoff).usable)
                 continue
             if item not in versions or item in chosen_versions:
                 continue
@@ -362,7 +383,7 @@ class MemoryWriter:
                 continue
             chosen_versions.add(item)
             # 只展开直接修订与选中的完整路径，不把整个版本族搬入每个请求。
-            if version.revision:
+            if version.revision and item in direct_version_ids:
                 stack.append(version.revision.previous_version_id)
             refs = list(version.revision.evidence_refs) if version.revision else []
             paths = [dep for dep in dependencies.values() if dep.target_version_id == item and dep.effect == "SUPPORT"]
@@ -385,7 +406,7 @@ class MemoryWriter:
                     spans.setdefault(span.source_id, []).append(span)
                 stack.extend(span.source_id for span in ref.context_refs)
         serialized_versions = []
-        for version_id in sorted(chosen_versions):
+        for version_id in dict.fromkeys([*(item for item in ids if item in chosen_versions), *sorted(chosen_versions)]):
             version = versions[version_id]
             data = version.model_dump(mode="json", exclude={"namespace", "created_at", "status"})
             if version_id in view.versions:
@@ -683,6 +704,20 @@ class MemoryWriter:
         remaining = [dep for dep in graph.dependencies if dep.temporary_id not in receipt["done"]]
         staged = StagedWrite()
         mapping: dict[str, str] = dict(receipt["mapping"])
+        # 精确复述直接复用已有版本；新的独立支持路径仍走验证，不能制造自依赖。
+        visible = self.store.view(source_cutoff=cutoff)
+        def same_statement(claim, version):
+            unspecified = (claim.valid_time.start is None and claim.valid_time.end is None and claim.valid_time.text is None
+                           and claim.valid_time.kind in {"unknown", version.valid_time.kind})
+            return (" ".join(claim.content.split()) == " ".join(version.content.split())
+                    and claim.modality == version.modality
+                    and (unspecified or claim.valid_time == version.valid_time))
+        for name, claim in claims.items():
+            if name not in mapping:
+                match = next((v for v in visible.versions.values() if same_statement(claim, v)
+                              and self.evaluator.evaluate(v.id, source_cutoff=cutoff).usable), None)
+                if match:
+                    mapping[name] = match.id
         failed: list[dict] = []
         failed.extend(graph.issues)
         completed_targets: set[str] = set(mapping)
@@ -719,12 +754,41 @@ class MemoryWriter:
                             failed.append({"target_id": target_id, "stage": "grounding", "reason": "atomic_premise_unresolved"})
                             continue
                     resolved_dep = dep.model_copy(update={"premise_refs": refs})
+                    real_target = mapping.get(target_id, target_id)
+                    if any(ref.type == "CURRENT" and ref.id == real_target for ref in refs):
+                        receipt["done"].append(dep.temporary_id)
+                        continue
+                    known = {dependency_signature(d) for d in self.store.dependencies()}
+                    signature = dependency_signature(DependencyLink(namespace=self.store.namespace,
+                        target_version_id=real_target, premise_refs=refs, effect=dep.effect, effective_time=dep.effective_time))
+                    if signature in known:
+                        receipt["done"].append(dep.temporary_id)
+                        continue
                     premise_ids = [ref.id for ref in refs]
                     extra_context = {"target": claims[target_id].model_dump(mode="json") if target_id in claims
                                      else {**self.store.get_version(target_id).model_dump(mode="json", exclude={"namespace", "created_at", "status"}),
                                            "resolution": self.evaluator.evaluate(target_id, source_cutoff=cutoff).model_dump(mode="json")},
                                      "input_policy": policy.model_dump(mode="json")}
                     try:
+                        self._check_premises(refs, self._context(premise_ids, cutoff, prefix, staged), cutoff, prefix, staged)
+                    except ValueError as error:
+                        failed.append({"target_id": target_id, "stage": "verify", "reason": str(error)})
+                        continue
+                    premise_evidence = []
+                    for ref in refs:
+                        if ref.type == "SOURCE":
+                            source = self.store.get_source(ref.id)
+                            text = self.evaluator.source_text(ref.id, source_cutoff=cutoff)[ref.span.start:ref.span.end]
+                            premise_evidence.append({"reference": ref.model_dump(mode="json"), "text": text,
+                                "speaker": source.speaker, "source_order": source.source_order})
+                        else:
+                            proof = self.evaluator.evidence(ref.id, ref.at_time if ref.type == "HISTORICAL" else None,
+                                                            source_cutoff=cutoff, token_counter=self.llm.count_tokens)
+                            premise_evidence.append({"reference": ref.model_dump(mode="json"),
+                                "content": self.store.get_version(ref.id).content, "evidence": proof.text})
+                    extra_context["premise_evidence"] = premise_evidence
+                    try:
+                        # 容量检查与实际发送使用同一份逐路径证据，不再预装无关历史。
                         verify_context = self._candidates([target_content], "validate", cutoff, prefix,
                                                            premise_ids + ([target_id] if target_id not in claims else []), staged,
                                                            request_builder=lambda value: (VERIFICATION_PROMPT, self.inducer.verification_payload(
@@ -733,11 +797,6 @@ class MemoryWriter:
                         failed.append({"target_id": target_id, "stage": "verify", **failure_details(error)})
                         continue
                     verify_context.update(extra_context)
-                    try:
-                        self._check_premises(refs, verify_context, cutoff, prefix, staged)
-                    except ValueError as error:
-                        failed.append({"target_id": target_id, "stage": "verify", "reason": str(error)})
-                        continue
                     try:
                         verification = self.inducer.verify(resolved_dep, verify_context)
                     except RecoverableModelError as error:
@@ -919,16 +978,27 @@ class MemoryWriter:
                 return list(dict.fromkeys(changed_ids)), failed
             after = self._semantic_state(staged.changed_ids, cutoff)
             changed_ids.extend(key for key in staged.changed_ids if before.get(key) != after.get(key))
+        receipt["mapping"] = mapping
+        self.store.set_progress(receipt_key, receipt)
         return list(dict.fromkeys(changed_ids)), failed
 
     def _bind_atomic_premises(self, refs, cutoff):
-        """只复用唯一、精确匹配的原子出处；不能把原文标识改名伪装成事实。"""
+        """仅绑定来源片段明确对应的唯一事实；数字前缀差异不再导致误拒绝。"""
         view = self.store.view(source_cutoff=cutoff)
         bound = []
         for ref in refs:
-            matches = {dep.target_version_id for dep in view.dependencies.values() if dep.effect == "SUPPORT"
-                       and len(dep.premise_refs) == 1 and dep.premise_refs[0] == ref
-                       and self.evaluator.evaluate(dep.target_version_id, source_cutoff=cutoff).usable}
+            matches = set()
+            for dep in view.dependencies.values():
+                if dep.effect != "SUPPORT" or len(dep.premise_refs) != 1:
+                    continue
+                saved = dep.premise_refs[0]
+                if saved.type != "SOURCE" or saved.id != ref.id:
+                    continue
+                a, b = saved.span, ref.span
+                contained = (a.start <= b.start < b.end <= a.end or b.start <= a.start < a.end <= b.end)
+                if (contained and all(ctx in saved.context_refs for ctx in ref.context_refs)
+                        and self.evaluator.evaluate(dep.target_version_id, source_cutoff=cutoff).usable):
+                    matches.add(dep.target_version_id)
             if len(matches) != 1:
                 return []
             bound.append(PremiseRef(type="CURRENT", id=next(iter(matches))))
