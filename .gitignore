@@ -9,6 +9,12 @@
 
 # 实验产物只留本地；可复现入口在 examples/ 中。
 /experiments/
+
+# 本地分析产物、研究过程日志及结果备份；正式结果文档继续跟踪。
+/profile_output/
+/refine-logs/
+/docs/experiment_results_[0-9]*.md
+
 /examples/evaluate_*/run.sh
 /examples/evaluate_ourmem_on_*/api_config.json
 /examples/evaluate_ourmem_on_*/local_config.json
